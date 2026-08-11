@@ -1,0 +1,17 @@
+# Python 缓存
+__pycache__/
+*.py[cod]
+.pytest_cache/
+
+# IDE
+.idea/
+.vscode/
+
+# 运行时产物
+.agent_cache/
+.mini-code-memory/
+.mini-code-memory-local/
+.mini-code-session-memory/
+
+# 会话/记忆数据(用户本地)
+.my-agent-memory.json
