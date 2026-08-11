@@ -6,6 +6,8 @@ from dataclasses import dataclass, field
 from typing import Any, Callable
 from pathlib import Path
 
+from minicore.path_safety import resolve_tool_path
+
 
 @dataclass
 class ToolResult:
@@ -37,8 +39,12 @@ class ToolDefinition:
 # ---------- 工具实现 ----------
 
 def _list_files(input_data: dict, context: ToolContext) -> ToolResult:
-    path = Path(input_data.get("path", "."))
-    safe = (Path(context.cwd) / path).resolve()
+    try:
+        safe = resolve_tool_path(context, input_data.get("path", "."), mode="list")
+    except PermissionError as e:
+        return ToolResult(ok=False, output=str(e))
+    except RuntimeError as e:
+        return ToolResult(ok=False, output=str(e))
     try:
         entries = sorted(safe.iterdir(), key=lambda p: (not p.is_dir(), p.name.lower()))
     except FileNotFoundError:
@@ -48,8 +54,12 @@ def _list_files(input_data: dict, context: ToolContext) -> ToolResult:
 
 
 def _read_file(input_data: dict, context: ToolContext) -> ToolResult:
-    path = Path(input_data.get("path", "."))
-    safe = (Path(context.cwd) / path).resolve()
+    try:
+        safe = resolve_tool_path(context, input_data.get("path", "."), mode="read")
+    except PermissionError as e:
+        return ToolResult(ok=False, output=str(e))
+    except RuntimeError as e:
+        return ToolResult(ok=False, output=str(e))
     if not safe.exists():
         return ToolResult(ok=False, output=f"Path not found: {safe}")
     if safe.is_dir():
@@ -61,11 +71,36 @@ def _read_file(input_data: dict, context: ToolContext) -> ToolResult:
     return ToolResult(ok=True, output=text)
 
 
+def _command_has_path_escape(command: str, cwd: str) -> bool:
+    """检查命令是否试图访问项目目录外的路径。"""
+    import os
+    cwd_abs = os.path.normcase(os.path.abspath(cwd))
+    lowered = command.lower()
+    # 绝对路径访问(如 C:\、/etc/、/usr/、/home/)
+    abs_patterns = [
+        r"^\s*cd\s+[a-z]:[\\/]",        # cd C:\
+        r"^\s*cd\s+/",                  # cd /
+        r"[a-z]:[\\/]windows",          # C:\windows
+        r"/etc/", r"/usr/", r"/home/",  # 类 Unix 系统目录
+    ]
+    import re
+    for pat in abs_patterns:
+        if re.search(pat, lowered):
+            return True
+    return False
+
+
 def _run_command(input_data: dict, context: ToolContext) -> ToolResult:
     command = input_data.get("command", "")
     timeout = float(input_data.get("timeout", 30))
     if not command.strip():
         return ToolResult(ok=False, output="No command given")
+    # 路径沙箱:拒绝访问项目外路径的命令
+    if _command_has_path_escape(command, context.cwd):
+        return ToolResult(
+            ok=False,
+            output=f"[安全] 命令试图访问项目目录外: {command[:80]}. agent 只能在项目内执行命令。",
+        )
     try:
         # Windows 下强制子进程用 UTF-8 输出,避免 GBK 编解码错乱
         import os as _os
@@ -94,11 +129,16 @@ def _run_command(input_data: dict, context: ToolContext) -> ToolResult:
 
 def _write_file(input_data: dict, context: ToolContext) -> ToolResult:
     """写文件:写之前先打 checkpoint(如果会话存在),这样能回退。"""
-    path = Path(input_data.get("path", ""))
+    path = str(input_data.get("path", ""))
     content = input_data.get("content", "")
-    if not path.name:
+    if not path.strip():
         return ToolResult(ok=False, output="No path given")
-    safe = (Path(context.cwd) / path).resolve()
+    try:
+        safe = resolve_tool_path(context, path, mode="write")
+    except PermissionError as e:
+        return ToolResult(ok=False, output=str(e))
+    except RuntimeError as e:
+        return ToolResult(ok=False, output=str(e))
 
     # 写之前:记录旧内容作为 checkpoint
     if context.session is not None:
@@ -139,12 +179,17 @@ def _edit_file(input_data: dict, context: ToolContext) -> ToolResult:
 
     必须恰好出现 1 次才替换,避免误改。改之前打 checkpoint,支持回退。
     """
-    path = input_data.get("path", "")
+    path = str(input_data.get("path", ""))
     old_str = input_data.get("old_str", "")
     new_str = input_data.get("new_str", "")
     if not path or not old_str:
         return ToolResult(ok=False, output="path 和 old_str 必填")
-    safe = (Path(context.cwd) / path).resolve()
+    try:
+        safe = resolve_tool_path(context, path, mode="write")
+    except PermissionError as e:
+        return ToolResult(ok=False, output=str(e))
+    except RuntimeError as e:
+        return ToolResult(ok=False, output=str(e))
     if not safe.exists():
         return ToolResult(ok=False, output=f"Path not found: {safe}")
 

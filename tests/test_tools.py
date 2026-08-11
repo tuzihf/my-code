@@ -27,9 +27,11 @@ class TestListFiles:
         assert r.ok is True
 
     def test_nonexistent_path(self, tools, ctx):
+        # 绝对路径 /definitely/not/here 会被沙箱拦截(或返回 not found),都合理
         r = tools.execute("list_files", {"path": "/definitely/not/here"}, ctx)
         assert r.ok is False
-        assert "not found" in r.output.lower() or "找不到" in r.output
+        assert ("not found" in r.output.lower() or "找不到" in r.output
+                or "逃逸" in r.output or "项目目录" in r.output)
 
 
 class TestInputValidation:

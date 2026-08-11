@@ -12,46 +12,56 @@
    │
    ▼
 main.py ──────────────── 入口:组装工具/模型/会话/记忆/权限,交互循环
-   │                       支持 /sessions /resume /rewind 等本地命令
+   │                       支持 /sessions /resume /rewind /history
    ▼
-agent_loop.py ────────── 主干循环(心脏):
-   │                        while 有步数:
-   │                          ① 推导 phase (kernel.derive_phase)
-   │                          ② 上下文压缩 (context_compactor.compact)
-   │                          ③ 问模型 (model.next) → 失败则 fallback (model_switcher)
-   │                          ④ 模型要调工具? 过权限 (permissions) → 执行 (tools.execute)
-   │                          ⑤ read_dedup 去重读 → 结果回填 → 回到①
-   │                          收尾:verify 阶段强制给结论 (门禁)
-   ▼
-tools.py ─────────────── 工具注册表 + 6 个工具(带输入校验)
-kernel.py ────────────── phase 状态机 (explore/execute/verify) + verification 门禁
-session.py ───────────── 会话存盘 + checkpoint + rewind + 可读对话统计
-memory.py ────────────── 项目记忆存盘 + 注入 system prompt
-context_compactor.py ─── 上下文超阈值时压缩旧历史(保留用户提问)
-read_dedup.py ────────── 同一文件重复读 → 返回占位,省 token
-permissions.py ───────── 敏感工具(写/命令/记忆)执行前问用户
-model_switcher.py ────── 主模型失败 → 自动切备用模型
-api_retry.py ─────────── API 超时/限流/5xx → 指数退避重试
-model.py ─────────────── 模型接口 + DeepSeek 真实实现 + Mock 假实现
+minicore/ (包,15 个模块)
+   │
+   ├── agent_loop.py ─── 主干循环(心脏):
+   │     while 有步数:
+   │       ① 推导 phase (kernel.derive_phase)
+   │       ② 上下文压缩 (context_compactor.compact)
+   │       ③ 问模型 (model.next) → 失败则 fallback (model_switcher)
+   │       ④ 模型要调工具? 过权限 (permissions) → 执行 (tools.execute)
+   │       ⑤ read_dedup 去重读 → 结果回填 → 回到①
+   │       收尾:verify 阶段强制给结论 (门禁)
+   │
+   ├── tools.py ───────── 工具注册表 + 6 工具 + MCP 集成 + 输入校验
+   ├── kernel.py ──────── phase 状态机 (explore/execute/verify) + verification 门禁
+   ├── session.py ─────── 会话存盘 + checkpoint + rewind + 可读对话统计
+   ├── memory.py ──────── 项目记忆存盘 + 注入 system prompt
+   ├── context_compactor.py ─ 上下文超阈值时压缩旧历史(保留用户提问)
+   ├── read_dedup.py ──── 同一文件重复读 → 返回占位,省 token
+   ├── tool_cache.py ──── 大段工具结果 → 磁盘缓存,对话留引用
+   ├── permissions.py ─── 敏感工具(写/命令/记忆)执行前问用户
+   ├── model_switcher.py ─ 主模型失败 → 自动切备用模型
+   ├── api_retry.py ────── API 超时/限流/5xx → 指数退避重试
+   ├── model.py ────────── 模型接口 + DeepSeek(流式) + Mock
+   ├── mcp.py ──────────── MCP 客户端(stdio 连外部服务)
+   └── fake_mcp_server.py ─ MCP 假服务端(测试用)
 ```
+
+**结构说明**:所有模块收进 `minicore/` 包(平铺),和原版 `minicode/` 同构。模块间用 `from minicore.xxx import` 互引。
 
 ## 二、每个模块的职责(一句话)
 
 | 文件 | 作用 |
 |---|---|
 | `main.py` | 入口,交互循环,本地命令(`/sessions` `/resume` `/rewind` `/history`) |
-| `agent_loop.py` | 主循环:问模型→调工具→回填→再来,带 phase/门禁/压缩/权限/fallback/**并行工具** |
-| `kernel.py` | phase 状态机 + verification 门禁(模型说"做完"时检查证据) |
-| `tools.py` | 工具注册表 + 6 工具 + **输入校验**(validate) |
-| `session.py` | 会话存盘 JSON + checkpoint/rewind + `readable_conversation_count` |
-| `memory.py` | 项目记忆存盘 + 注入 system prompt(跨会话记住) |
-| `context_compactor.py` | 上下文超阈值→把旧历史浓缩成摘要(**保留用户提问**) |
-| `read_dedup.py` | 同文件二次读→占位(`[read_dedup]`) |
-| `permissions.py` | 敏感工具执行前 `input()` 问用户,`allow/deny` |
-| `model_switcher.py` | 模型候选列表,失败切换 |
-| `api_retry.py` | 可恢复错误(超时/限流/5xx)指数退避重试,不可恢复直接抛 |
-| `model.py` | `Model` 接口 + `DeepSeekModel`(真,带重试) + `MockModel`(假) |
-| `cleanup_sessions.py` | 按"可读对话占比"清理旧会话 |
+| `minicore/agent_loop.py` | 主循环:问模型→调工具→回填→再来,带 phase/门禁/压缩/权限/fallback/**并行工具**/流式 |
+| `minicore/kernel.py` | phase 状态机 + verification 门禁(模型说"做完"时检查证据) |
+| `minicore/tools.py` | 工具注册表 + 6 工具 + **输入校验** + MCP 集成 |
+| `minicore/session.py` | 会话存盘 JSON + checkpoint/rewind + `readable_conversation_count` |
+| `minicore/memory.py` | 项目记忆存盘 + 注入 system prompt(跨会话记住) |
+| `minicore/context_compactor.py` | 上下文超阈值→把旧历史浓缩成摘要(**保留用户提问**) |
+| `minicore/read_dedup.py` | 同文件二次读→占位(`[read_dedup]`) |
+| `minicore/tool_cache.py` | 大段工具结果→磁盘缓存,对话留引用 |
+| `minicore/permissions.py` | 敏感工具执行前 `input()` 问用户,`allow/deny` |
+| `minicore/model_switcher.py` | 模型候选列表,失败切换 |
+| `minicore/api_retry.py` | 可恢复错误(超时/限流/5xx)指数退避重试,不可恢复直接抛 |
+| `minicore/model.py` | `Model` 接口 + `DeepSeekModel`(真,带重试/流式) + `MockModel`(假) |
+| `minicore/mcp.py` | MCP 客户端:stdio 连外部服务,列工具/调工具 |
+| `minicore/fake_mcp_server.py` | 假 MCP 服务端(add 计算器,测试用) |
+| `minicore/cleanup_sessions.py` | 按"可读对话占比"清理旧会话 |
 
 ## 三、核心机制
 
@@ -100,7 +110,46 @@ model.py ─────────────── 模型接口 + DeepSeek �
 - 第一层:input 必须是 dict;第二层:每个工具的专属校验(必填字段/类型)
 - 模型传错参数 → 优雅返回错误结果,不崩
 
-## 四、踩坑记录(最有价值的部分)
+### 9. 流式输出(`model.py`)
+- `DeepSeekModel.next(on_chunk=...)` 传回调时用 `stream=True`,逐 chunk 返回
+- `on_chunk` 逐个打印 → "打字机"效果
+- 工具调用也支持流式(分段累积 `tool_calls`)
+- 对应原版 `on_stream_chunk`
+
+### 10. MCP 接入(`mcp.py`)
+- `StdioMcpClient`:用 `subprocess.Popen` 起服务端子进程,stdio 上 JSON-RPC 通信
+- `tools/list` 列工具,`tools/call` 调工具
+- MCP 工具包装成 `ToolDefinition`,和内置工具平级进 `ToolRegistry`
+- 模型能自主发现并调用 MCP 工具(如 `add`)
+- 对应原版 `create_mcp_backed_tools`
+
+## 四、测试体系(pytest)
+
+从"手写 verify 脚本"升级到 pytest,逐步淘汰了 30 个 verify_*.py:
+
+```
+tests/
+├── conftest.py                       把项目根加入 sys.path
+├── test_tools.py                     工具 + 边界(空/None/特殊字符/未知工具)
+├── test_session.py                   会话存读 + 多步回退 + 可读对话过滤
+├── test_kernel_compactor_memory.py   phase/门禁/压缩/去重/记忆
+├── test_permissions_switch_retry.py  权限/fallback/重试(含重试耗尽)
+├── test_tool_cache_mcp.py            工具持久化 + MCP
+└── test_integration.py               真实API/性能/编码(标记 integration)
+```
+
+命令:
+- `python -m pytest`                  # 53 单元测试(默认)
+- `python -m pytest -m integration`   # 5 集成测试(真实 API/性能)
+- `python -m pytest -m "not integration"`  # 等同默认
+
+pytest 比 verify 脚本强在哪:
+- **断言**:`assert 具体值`,失败自动标红(verify 只 print,人眼判断)
+- **边界覆盖**:空/None/特殊字符/重试耗尽,verify 没测
+- **回归基准**:压缩器不吞用户提问、摘要不嵌套,固化成测试
+- **marker 分类**:integration 标记,按需跑真实 API
+
+## 五、踩坑记录(最有价值的部分)
 
 ### Bug 1:checkpoint 多步回退错位
 **现象**:2 个 checkpoint 只回退 1 步,再回退停在 v2 而非 v1。
@@ -152,7 +201,7 @@ model.py ─────────────── 模型接口 + DeepSeek �
 **根因**:`main.py` 里 `text[:200]` 截断。
 **修复**:去掉截断,恢复显示完整问答。
 
-## 五、与 MiniCode 原版对照
+## 六、与 MiniCode 原版对照
 
 | MiniCode 原版 | 我的迷你版 | 说明 |
 |---|---|---|
@@ -169,18 +218,28 @@ model.py ─────────────── 模型接口 + DeepSeek �
 | `tooling.py` validator | `tools.py` validate | 工具输入校验 |
 | `ToolScheduler`(agent_loop内) | `agent_loop.py` | 并行工具调用 |
 | `read_dedup`(context_compactor内) | `read_dedup.py` | 重复读去重 |
+| 工具结果持久化(compactor内) | `tool_cache.py` | 大结果挪磁盘 |
+| `mcp.py` | `mcp.py` + `fake_mcp_server.py` | MCP 接入外部服务 |
+| 流式输出(`on_stream_chunk`) | `model.py` | 打字机效果 |
 | `cli_commands.py` `/sessions` | `main.py` `/sessions` `/history` | 会话列表/恢复/历史 |
 
-**还没做的**:MCP、TUI、工具结果持久化、成本追踪、动态并发控制。
+**还没做的**:TUI、成本追踪、动态并发控制、子代理、Skills、沙箱路径隔离。
 
-## 六、下一步可做
+## 七、下一步可做
 
 - [x] API 重试 + 指数退避(`api_retry.py`)
 - [x] 并行工具调用(只读并发/写串行)
 - [x] 工具输入校验(validate)
 - [x] `/history` 随时看当前会话
-- [ ] MCP 接入外部服务
+- [x] MCP 接入外部服务(`mcp.py`)
+- [x] 工具结果持久化(大段输出挪磁盘,`tool_cache.py`)
+- [x] 流式输出(`model.py` on_chunk)
+- [x] 测试统一到 pytest(58 用例,`tests/`)
+- [x] 平铺包结构(`minicore/`)
+- [x] git 仓库存档
 - [ ] TUI 界面
-- [ ] 工具结果持久化(大段输出挪磁盘)
 - [ ] 成本追踪
 - [ ] 动态并发控制(按错误率/延迟调 worker 数)
+- [ ] 子代理委派(Subagent)
+- [ ] Skills 技能包
+- [ ] 沙箱路径隔离
