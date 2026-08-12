@@ -6,6 +6,7 @@ __pycache__/
 # IDE
 .idea/
 .vscode/
+.trae/
 
 # 运行时产物
 .agent_cache/
