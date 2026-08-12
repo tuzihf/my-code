@@ -171,9 +171,12 @@ def run_agent_turn(
             saw_tool_result = True
             recent_calls.append((tool_name, tool_input))
 
-            # 工具调用回调(供 UI 显示工具执行)
+            # 工具调用回调(供 UI 显示工具执行,传结果供 diff 展示)
             if on_tool_call is not None:
                 try:
+                    on_tool_call(tool_name, tool_input, result)
+                except TypeError:
+                    # 兼容旧签名(只收 tool_name, tool_input)
                     on_tool_call(tool_name, tool_input)
                 except Exception:
                     pass
@@ -186,8 +189,8 @@ def run_agent_turn(
                 elif file_path and result.ok:
                     read_dedup.register_read(file_path, result.output)
 
-            # 大结果持久化:超过阈值的结果挪到磁盘,对话只留引用
-            if result.ok and should_persist(result.output):
+            # 大结果持久化:只对 run_command 生效(read_file 要给模型看内容,不持久化)
+            if result.ok and tool_name == "run_command" and should_persist(result.output):
                 tool_id = call.get("id", "unknown")
                 result.output = persist_tool_result(cwd, tool_id, result.output)
 

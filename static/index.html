@@ -130,6 +130,40 @@
   .content table.md-table th { background: var(--panel); font-weight: 600; }
   .msg.user .content { color: var(--text); }
 
+  /* 代码修改 diff 展示(默认折叠) */
+  .diff-block {
+    margin: 8px 0 20px;
+    border: 1px solid var(--border);
+    border-radius: 10px;
+    overflow: hidden;
+    font-family: ui-monospace, "Cascadia Code", monospace;
+    font-size: 13px;
+    background: #fafafa;
+  }
+  .diff-block summary {
+    padding: 8px 12px;
+    background: var(--panel);
+    border-bottom: 1px solid var(--border);
+    font-weight: 500;
+    font-size: 12.5px;
+    color: var(--text);
+    cursor: pointer;
+    list-style: none;
+    display: flex;
+    align-items: center;
+    gap: 6px;
+    user-select: none;
+  }
+  .diff-block summary:hover { background: var(--accent-soft); }
+  .diff-block summary::before { content: '▸'; transition: transform 0.15s; }
+  .diff-block[open] summary::before { content: '▾'; }
+  .diff-content { margin: 0; padding: 6px 0; overflow-x: auto; }
+  .diff-content div { padding: 1px 12px; white-space: pre; }
+  .diff-add { background: #e6f4ea; color: #1a7f37; }
+  .diff-del { background: #fdecea; color: #cf222e; }
+  .diff-ctx { color: var(--muted); }
+  .diff-skip { color: var(--muted); text-align: center; opacity: 0.6; }
+
   /* 工具调用汇总标签 */
   .tool-badge {
     margin: 6px 0;
@@ -581,8 +615,8 @@ async function loadBrowseDir(path) {
     document.getElementById('browseUp').onclick = () => {
       if (data.parent !== null && data.parent !== undefined) loadBrowseDir(data.parent);
     };
-    if (!data.dirs.length) {
-      body.innerHTML = '<div class="modal-empty">此目录下没有子目录</div>';
+    if (!data.dirs.length && !data.files.length) {
+      body.innerHTML = '<div class="modal-empty">此目录为空</div>';
       return;
     }
     // 渲染目录列表
@@ -603,8 +637,19 @@ async function loadBrowseDir(path) {
       });
       return row;
     });
+    // 渲染文件列表(带扩展名图标)
+    const fileRows = (data.files || []).map(name => {
+      const fullPath = path ? (path.endsWith('/') || path.endsWith('\\') ? path + name : path + '/' + name) : name;
+      const row = document.createElement('div');
+      row.className = 'dir-row file-row';
+      row.innerHTML = `<div class="dir-name">📄 ${name}</div>`;
+      // 点击文件 → 选中该项目目录(文件所在目录)
+      row.addEventListener('click', () => selectWorkspace(path));
+      return row;
+    });
     body.innerHTML = '';
     rows.forEach(r => body.appendChild(r));
+    fileRows.forEach(r => body.appendChild(r));
   } catch (e) {
     body.innerHTML = '<div class="modal-empty">加载失败</div>';
   }
@@ -694,13 +739,19 @@ async function send() {
 
     // 接 SSE 流式
     const toolCalls = [];  // 收集工具调用,结束时汇总显示
+    const toolDiffs = [];  // 收集修改 diff,助手回答后统一插入
     const es = new EventSource(`/sessions/${sessionId}/stream`);
     activeStream = es;
     es.onmessage = (e) => {
       const payload = JSON.parse(e.data);
       if (payload.type === 'tool_call') {
-        // 只收集,不逐条显示(避免刷屏)
+        // 只收集,不实时刷屏;结束后统一显示汇总
         toolCalls.push(payload.tool);
+        return;
+      }
+      if (payload.type === 'tool_diff') {
+        // 收集 diff,等助手回答后统一插入(默认折叠)
+        toolDiffs.push(payload);
         return;
       }
       if (payload.delta) {
@@ -729,6 +780,30 @@ async function send() {
           badge.textContent = `⚙ 使用了工具: ${names.join(', ')}`;
           msg.querySelector('.body').insertBefore(badge, currentAssistantMsg);
         }
+        // 修改 diff:在助手回答后插入,默认折叠
+        toolDiffs.forEach(d => {
+          const details = document.createElement('details');
+          details.className = 'diff-block';
+          const summary = document.createElement('summary');
+          summary.className = 'diff-title';
+          summary.textContent = `✏️ 修改: ${d.tool}`;
+          details.appendChild(summary);
+          const pre = document.createElement('pre');
+          pre.className = 'diff-content';
+          d.diff.split('\n').forEach(line => {
+            const lineEl = document.createElement('div');
+            if (line === '...') lineEl.className = 'diff-skip';
+            else if (line.startsWith('+')) lineEl.className = 'diff-add';
+            else if (line.startsWith('-')) lineEl.className = 'diff-del';
+            else lineEl.className = 'diff-ctx';
+            lineEl.textContent = line || ' ';
+            pre.appendChild(lineEl);
+          });
+          details.appendChild(pre);
+          // 插入到助手消息块之后(对话末尾)
+          msg.parentNode.insertBefore(details, msg.nextSibling);
+        });
+        scrollBottom();
         // 兜底:如果没有收到任何流式增量(如 Mock 模型),移除占位并从 history 拉最终回答
         const thinkingLeft = currentAssistantMsg.querySelector('.thinking');
         if (thinkingLeft || !currentAssistantMsg.textContent.trim()) {

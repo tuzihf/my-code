@@ -140,17 +140,21 @@ def _write_file(input_data: dict, context: ToolContext) -> ToolResult:
     except RuntimeError as e:
         return ToolResult(ok=False, output=str(e))
 
-    # 写之前:记录旧内容作为 checkpoint
+    # 写之前:记录旧内容(checkpoint + diff 用)
+    old_content = ""
+    if safe.exists():
+        try:
+            old_content = safe.read_text(encoding="utf-8")
+        except Exception:
+            old_content = ""
     if context.session is not None:
-        existed = safe.exists()
-        prev = safe.read_text(encoding="utf-8") if existed else ""
         try:
             from minicore.session import create_file_checkpoint
             create_file_checkpoint(
                 context.session,
                 file_path=str(safe),
-                existed=existed,
-                previous_content=prev,
+                existed=bool(old_content) or safe.exists(),
+                previous_content=old_content,
             )
         except ImportError:
             pass  # 没有 session 模块时静默跳过
@@ -160,7 +164,16 @@ def _write_file(input_data: dict, context: ToolContext) -> ToolResult:
         safe.write_text(content, encoding="utf-8")
     except Exception as e:
         return ToolResult(ok=False, output=f"Write failed: {e}")
-    return ToolResult(ok=True, output=f"Wrote {safe} ({len(content)} chars)")
+    # 生成 diff 展示修改详情
+    try:
+        from minicore.diff import format_diff_text
+        diff_text = format_diff_text(old_content, content)
+    except Exception:
+        diff_text = ""
+    msg = f"Wrote {safe} ({len(content)} chars)"
+    if diff_text:
+        msg += "\n\n" + diff_text
+    return ToolResult(ok=True, output=msg)
 
 
 def _remember(input_data: dict, context: ToolContext) -> ToolResult:
@@ -220,7 +233,66 @@ def _edit_file(input_data: dict, context: ToolContext) -> ToolResult:
         safe.write_text(new_content, encoding="utf-8")
     except Exception as e:
         return ToolResult(ok=False, output=f"Write failed: {e}")
-    return ToolResult(ok=True, output=f"已替换 1 处: {old_str!r} → {new_str!r}")
+    # 生成 diff 展示修改详情
+    try:
+        from minicore.diff import format_diff_text
+        diff_text = format_diff_text(content, new_content)
+    except Exception:
+        diff_text = ""
+    msg = f"已替换 1 处: {old_str!r} → {new_str!r}"
+    if diff_text:
+        msg += "\n\n" + diff_text
+    return ToolResult(ok=True, output=msg)
+
+
+# 子代理模型(由 server 启动时设置)
+_SUB_AGENT_MODEL = None
+
+
+def _delegate(input_data: dict, context: ToolContext) -> ToolResult:
+    """子代理:派一个只读子循环去执行子任务。
+
+    子代理有自己的独立上下文(不含主对话历史),用只读工具集,
+    跑完返回结果文字。适合"调研/分析"类子任务。
+    """
+    task = str(input_data.get("task", "")).strip()
+    max_steps = int(input_data.get("max_steps", 10))
+    if not task:
+        return ToolResult(ok=False, output="task 必填")
+    try:
+        # 延迟 import,避免循环依赖(tools → agent_loop → tools)
+        from minicore.agent_loop import run_agent_turn
+        from minicore.model import set_tools
+        from minicore.tools import create_default_tools
+
+        # 子代理用全局模型(由 server 启动时设置)
+        from minicore.tools import _SUB_AGENT_MODEL
+        if _SUB_AGENT_MODEL is None:
+            return ToolResult(ok=False, output="子代理模型未配置")
+
+        # 子代理只读工具集
+        sub_tools = create_default_tools()
+        set_tools(sub_tools)
+
+        # 独立上下文:子代理只看到自己的任务
+        sub_messages = [
+            {"role": "system", "content": f"你是一个子代理,负责完成以下子任务。使用只读工具调研,最后给出结论。"},
+            {"role": "user", "content": task},
+        ]
+        result = run_agent_turn(
+            model=_SUB_AGENT_MODEL,
+            tools=sub_tools,
+            messages=sub_messages,
+            cwd=context.cwd,
+            max_steps=max_steps,
+        )
+        # 取最后一条 assistant 内容作为结论
+        for m in reversed(result):
+            if m.get("role") == "assistant" and m.get("content"):
+                return ToolResult(ok=True, output=f"[子代理结果]\n{m['content']}")
+        return ToolResult(ok=False, output="子代理未产生结论")
+    except Exception as e:
+        return ToolResult(ok=False, output=f"子代理执行失败: {e}")
 
 
 # ---------- 注册表 ----------
@@ -376,6 +448,11 @@ def create_default_tools() -> ToolRegistry:
             description="Precisely replace a unique old_str with new_str in a file. Input: {\"path\": \"<file>\", \"old_str\": \"<exact text>\", \"new_str\": \"<replacement>\"}",
             run=_edit_file,
             validate=_validate_edit,
+        ),
+        ToolDefinition(
+            name="delegate",
+            description="Delegate a subtask to a read-only sub-agent. Use for research/analysis. Input: {\"task\": \"<subtask description>\", \"max_steps\": 10}",
+            run=_delegate,
         ),
     ]
 

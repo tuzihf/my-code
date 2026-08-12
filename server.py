@@ -114,6 +114,11 @@ def _get_model(config: dict | None = None):
 
 _MODEL = _get_model()
 
+# 设置子代理模型(tools.delegate 用)
+from minicore.tools import _SUB_AGENT_MODEL as _sub_model_ref
+import minicore.tools as _tools_mod
+_tools_mod._SUB_AGENT_MODEL = _MODEL
+
 
 def _system_prompt() -> str:
     prompt = (
@@ -217,6 +222,8 @@ def set_model_settings(req: ModelConfigRequest):
         return {"error": f"模型配置无效: {e}"}, 400
     set_model_config(config)
     _MODEL = new_model
+    import minicore.tools as _tools_mod
+    _tools_mod._SUB_AGENT_MODEL = _MODEL  # 同步子代理模型
     return {"ok": True, "model": getattr(_MODEL, "model_id", req.model)}
 
 
@@ -339,6 +346,10 @@ def browse(path: str = ""):
             d.name for d in p.iterdir()
             if d.is_dir() and not d.name.startswith((".", "node_modules", "__pycache__", "venv"))
         )
+        files = sorted(
+            d.name for d in p.iterdir()
+            if d.is_file() and not d.name.startswith(".")
+        )
     except PermissionError:
         return {"error": "无权限访问该目录"}, 403
     # parent:盘符本身 → 上级是盘符根(空);否则是上一级目录
@@ -349,7 +360,7 @@ def browse(path: str = ""):
         parent = ""
     elif p.parent != p:
         parent = str(p.parent)
-    return {"path": str(p), "parent": parent, "dirs": subdirs, "is_root": False}
+    return {"path": str(p), "parent": parent, "dirs": subdirs, "files": files, "is_root": False}
 
 
 @app.get("/sessions")
@@ -454,25 +465,39 @@ def chat(req: ChatRequest):
     # 给这次 chat 分配流版本号,隔离并发线程的旧数据
     stream_id = state.get("_stream_id", 0) + 1
     state["_stream_id"] = stream_id
+    state["events"] = []
     state["chunks"] = []
     state["tool_calls"] = []
+    state["tool_diffs"] = []
     state["done"] = False
 
     # 后台线程跑 agent,结果写回 state(chunks 列表由 GIL 保证线程安全)
     def _run():
-        chunks: list[str] = []
+        events: list[dict] = []  # 有序事件队列(按真实执行顺序)
+
+        def emit(evt: dict) -> None:
+            events.append(evt)
 
         def on_chunk(text: str) -> None:
-            chunks.append(text)
+            emit({"type": "delta", "delta": text})
 
-        def on_tool_call(tool_name: str, tool_input: dict) -> None:
-            # 实时追加到 state,SSE 端点能立即读到
+        def on_tool_call(tool_name: str, tool_input: dict, result=None) -> None:
             summary = tool_name
             if "path" in tool_input:
                 summary += f" {tool_input['path']}"
             elif "command" in tool_input:
                 summary += f" {str(tool_input['command'])[:40]}"
             state.setdefault("tool_calls", []).append(summary)
+            emit({"type": "tool_call", "tool": summary})
+            # 修改类工具:收集 diff 供前端展示
+            if tool_name in ("edit_file", "write_file") and result is not None and result.ok:
+                output = result.output
+                if "修改详情" in output or "---" in output:
+                    emit({"type": "tool_diff", "tool": summary, "diff": output})
+                    state.setdefault("tool_diffs", []).append({
+                        "tool": summary,
+                        "diff": output,
+                    })
 
         try:
             messages = run_agent_turn(
@@ -489,14 +514,14 @@ def chat(req: ChatRequest):
             # 只在还是当前 stream 时写回(防止旧线程覆盖新线程数据)
             if state.get("_stream_id") == stream_id:
                 state["messages"] = messages
-                state["chunks"] = chunks
+                state["events"] = events
                 state["done"] = True
                 print(f"[agent] 完成, {len(messages)} 条消息")
                 _persist_session(state)  # 持久化到磁盘
         except Exception as e:
             import traceback
             traceback.print_exc()
-            state["chunks"] = chunks
+            state["events"] = events
             state["done"] = True
             state["error"] = str(e)
             _persist_session(state)  # 异常也保存
@@ -514,24 +539,24 @@ async def session_stream(session_id: str):
 
     async def gen():
         seen = 0
-        seen_tools = 0
         # 绑定当前流版本,只推本请求的增量
         my_stream = state.get("_stream_id", 0)
         while True:
             # 如果新请求开始了,旧流立即结束,不推旧数据
             if state.get("_stream_id", 0) != my_stream:
                 break
-            # 先推工具调用(语义上:模型先调工具,再给文本)
-            tool_calls = state.get("tool_calls", [])
-            while seen_tools < len(tool_calls):
-                yield f"data: {json.dumps({'type': 'tool_call', 'tool': tool_calls[seen_tools]})}\n\n"
-                seen_tools += 1
-            # 再推文本增量(放慢流速,每次推一个 chunk 后停顿)
-            chunks = state.get("chunks", [])
-            while seen < len(chunks):
-                yield f"data: {json.dumps({'delta': chunks[seen]})}\n\n"
+            # 按真实执行顺序推事件(边输出边修改)
+            events = state.get("events", [])
+            while seen < len(events):
+                evt = events[seen]
+                if evt["type"] == "delta":
+                    yield f"data: {json.dumps({'delta': evt['delta']})}\n\n"
+                    await asyncio.sleep(0.02)  # 打字机节奏
+                elif evt["type"] == "tool_call":
+                    yield f"data: {json.dumps({'type': 'tool_call', 'tool': evt['tool']})}\n\n"
+                elif evt["type"] == "tool_diff":
+                    yield f"data: {json.dumps({'type': 'tool_diff', 'tool': evt['tool'], 'diff': evt['diff']})}\n\n"
                 seen += 1
-                await asyncio.sleep(0.02)  # 每字符间隔,制造"打字机"节奏
             if state.get("done"):
                 yield f"data: {json.dumps({'delta': '', 'done': True})}\n\n"
                 break
