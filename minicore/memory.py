@@ -52,6 +52,19 @@ class MemoryStore:
     def all(self) -> list[MemoryEntry]:
         return list(self.entries)
 
+    def delete(self, index: int) -> bool:
+        """删除指定索引的记忆。返回是否成功。"""
+        if 0 <= index < len(self.entries):
+            self.entries.pop(index)
+            self._save()
+            return True
+        return False
+
+    def clear(self) -> None:
+        """清空所有记忆。"""
+        self.entries = []
+        self._save()
+
     def render_for_prompt(self) -> str:
         """把记忆拼成一段文本,注入系统提示词。"""
         if not self.entries:

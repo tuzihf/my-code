@@ -196,6 +196,16 @@
   .send-btn:hover { opacity: 0.85; }
   .send-btn:disabled { opacity: 0.4; cursor: not-allowed; }
 
+  /* 停止生成按钮 */
+  .stop-btn {
+    width: 44px; height: 44px; border-radius: 12px;
+    border: 1px solid var(--danger); background: #fff; color: var(--danger);
+    font-size: 16px; cursor: pointer; flex-shrink: 0;
+    display: flex; align-items: center; justify-content: center;
+    transition: all 0.15s;
+  }
+  .stop-btn:hover { background: #fef2f2; }
+
   .hint { max-width: 720px; margin: 8px auto 0; font-size: 11px; color: var(--muted); }
 
   /* 左侧会话栏 */
@@ -280,6 +290,7 @@
   <div class="brand"><span class="dot"></span>my-agent</div>
   <div class="actions">
     <button id="modelBtn">⚙ 模型: <span id="modelName">?</span></button>
+    <button id="memoryBtn">🧠 记忆</button>
     <button id="workspaceBtn">📁 切换项目</button>
     <button id="newBtn">＋ 新会话</button>
   </div>
@@ -310,6 +321,7 @@
     <footer>
   <div class="input-row">
     <textarea id="input" rows="1" placeholder="输入消息,Enter 发送,Shift+Enter 换行"></textarea>
+    <button class="stop-btn" id="stopBtn" title="停止生成" style="display:none;">■</button>
     <button class="send-btn" id="sendBtn" title="发送">➤</button>
   </div>
   <div class="hint">会话 id: <span id="sid">(新建中)</span> · 工作目录: <span id="workspace">(加载中)</span></div>
@@ -369,10 +381,30 @@
   </div>
 </div>
 
+<!-- 记忆管理弹窗 -->
+<div class="modal-overlay" id="memoryModal" style="display:none;">
+  <div class="modal" style="width:460px;">
+    <div class="modal-header">
+      <span>记忆管理</span>
+      <button class="modal-close" id="memoryClose">✕</button>
+    </div>
+    <div class="modal-body" style="padding:12px 16px;">
+      <div style="display:flex;gap:8px;margin-bottom:12px;">
+        <input id="memoryInput" placeholder="添加新记忆..." style="flex:1;padding:8px 12px;border:1px solid var(--border);border-radius:8px;font:inherit;font-size:13px;">
+        <button id="memoryAdd" style="background:var(--accent);color:#fff;border:none;border-radius:8px;padding:8px 16px;font:inherit;font-size:13px;cursor:pointer;">添加</button>
+      </div>
+      <div id="memoryList" style="max-height:300px;overflow-y:auto;">
+        <div style="color:var(--muted);font-size:13px;">加载中...</div>
+      </div>
+    </div>
+  </div>
+</div>
+
 <script>
 const messagesEl = document.getElementById('messages');
 const inputEl = document.getElementById('input');
 const sendBtn = document.getElementById('sendBtn');
+const stopBtn = document.getElementById('stopBtn');
 const sidEl = document.getElementById('sid');
 const workspaceEl = document.getElementById('workspace');
 
@@ -633,6 +665,7 @@ async function send() {
   inputEl.value = '';
   resetInputHeight();  // 发送后强制回单行
   sendBtn.disabled = true;
+  stopBtn.style.display = 'flex';  // 显示停止按钮
   streaming = true;
 
   // 准备助手消息(流式填充)
@@ -685,6 +718,7 @@ async function send() {
         const finalText = currentAssistantMsg.textContent;
         currentAssistantMsg.innerHTML = renderMarkdown(finalText);
         streaming = false;
+        stopBtn.style.display = 'none';  // 隐藏停止按钮
         sendBtn.disabled = false;
         inputEl.focus();
         // 工具调用汇总标签(在消息块上方显示一个紧凑提示)
@@ -707,6 +741,7 @@ async function send() {
       es.close();
       activeStream = null;
       streaming = false;
+      stopBtn.style.display = 'none';
       sendBtn.disabled = false;
       currentAssistantMsg.classList.remove('stream-cursor');
     };
@@ -735,6 +770,25 @@ async function loadFinalAssistant() {
 
 // 事件绑定
 sendBtn.addEventListener('click', send);
+
+// 停止生成:关闭当前流,恢复输入
+stopBtn.addEventListener('click', () => {
+  if (activeStream) {
+    activeStream.close();
+    activeStream = null;
+  }
+  streaming = false;
+  stopBtn.style.display = 'none';
+  sendBtn.disabled = false;
+  if (currentAssistantMsg) {
+    currentAssistantMsg.classList.remove('stream-cursor');
+    // 移除"正在思考"占位
+    const thinking = currentAssistantMsg.querySelector('.thinking');
+    if (thinking) thinking.remove();
+  }
+  inputEl.focus();
+});
+
 inputEl.addEventListener('keydown', (e) => {
   if (e.key === 'Enter' && !e.shiftKey) {
     e.preventDefault();
@@ -890,6 +944,53 @@ document.getElementById('modelSave').addEventListener('click', async () => {
   if (data.error) { alert(data.error); return; }
   document.getElementById('modelModal').style.display = 'none';
   modelNameEl.textContent = data.model || model || type;
+});
+
+// ---- 记忆管理 ----
+async function renderMemoryList() {
+  const listEl = document.getElementById('memoryList');
+  try {
+    const res = await fetch('/memory');
+    const data = await res.json();
+    const memories = data.memories || [];
+    if (!memories.length) {
+      listEl.innerHTML = '<div style="color:var(--muted);font-size:13px;padding:10px;">暂无记忆</div>';
+      return;
+    }
+    listEl.innerHTML = '';
+    memories.forEach(m => {
+      const row = document.createElement('div');
+      row.style.cssText = 'display:flex;justify-content:space-between;align-items:center;padding:8px 10px;border-bottom:1px solid var(--border);font-size:13px;';
+      row.innerHTML = `<span style="flex:1;margin-right:10px;">${m.content}</span>`;
+      const delBtn = document.createElement('button');
+      delBtn.textContent = '删除';
+      delBtn.style.cssText = 'font-size:12px;padding:3px 10px;border:1px solid var(--border);border-radius:6px;background:#fff;color:var(--danger);cursor:pointer;';
+      delBtn.addEventListener('click', async () => {
+        await fetch('/memory', { method: 'DELETE', headers: { 'Content-Type': 'application/json' }, body: JSON.stringify({ index: m.index }) });
+        renderMemoryList();
+      });
+      row.appendChild(delBtn);
+      listEl.appendChild(row);
+    });
+  } catch (e) {
+    listEl.innerHTML = '<div style="color:var(--muted);font-size:13px;">加载失败</div>';
+  }
+}
+
+document.getElementById('memoryBtn').addEventListener('click', () => {
+  document.getElementById('memoryModal').style.display = 'flex';
+  renderMemoryList();
+});
+document.getElementById('memoryClose').addEventListener('click', () => {
+  document.getElementById('memoryModal').style.display = 'none';
+});
+document.getElementById('memoryAdd').addEventListener('click', async () => {
+  const input = document.getElementById('memoryInput');
+  const content = input.value.trim();
+  if (!content) return;
+  await fetch('/memory', { method: 'POST', headers: { 'Content-Type': 'application/json' }, body: JSON.stringify({ content }) });
+  input.value = '';
+  renderMemoryList();
 });
 
 // 初始化:恢复上次会话或新建

@@ -45,6 +45,48 @@ _PERMISSIONS = PermissionManager(CWD, prompt=lambda req: {"decision": "allow_onc
 _SESSIONS: dict[str, dict[str, Any]] = {}
 
 
+def _persist_session(state: dict[str, Any]) -> None:
+    """把会话内存态保存到磁盘(session.py)。"""
+    try:
+        from minicore.session import SessionData
+        # 从 state 构造 SessionData 并保存
+        sd = SessionData(
+            session_id=state["_sid"],
+            created_at=state.get("_created_at", 0),
+            workspace=state.get("cwd", CWD),
+            messages=state.get("messages", []),
+        )
+        sd.metadata.session_id = sd.session_id
+        sd.metadata.created_at = sd.created_at
+        sd.metadata.message_count = len(sd.messages)
+        sd.metadata.workspace = sd.workspace
+        sd.metadata.checkpoint_count = 0
+        # 存 name 到额外字段(简化为 metadata 不存,重启用文件恢复)
+        save_session(sd)
+    except Exception as e:
+        print(f"[持久化] 保存会话失败: {e}")
+
+
+def _load_all_sessions() -> None:
+    """启动时从磁盘恢复所有会话。"""
+    for sid in list_sessions():
+        sd = load_session(sid)
+        if sd is None:
+            continue
+        _SESSIONS[sid] = {
+            "messages": list(sd.messages),
+            "cwd": sd.workspace,
+            "name": f"会话 {sid[:8]}",
+            "_sid": sid,
+            "_created_at": sd.created_at,
+            "stream": None,
+        }
+
+
+# 启动时恢复
+_load_all_sessions()
+
+
 def _get_model(config: dict | None = None):
     """根据配置创建模型。config 结构来自 settings.json 的 model 字段。"""
     from minicore.model import OpenAICompatModel, DeepSeekModel, MockModel
@@ -98,10 +140,13 @@ def _ensure_session(session_id: str | None, cwd: str | None = None) -> dict[str,
     if session_id and session_id in _SESSIONS:
         return _SESSIONS[session_id]
     sid = session_id or create_new_session(cwd or CWD).session_id
+    import time as _t
     state = {
         "messages": [{"role": "system", "content": _system_prompt()}],
         "cwd": cwd or CWD,
         "name": f"会话 {sid[:8]}",
+        "_sid": sid,
+        "_created_at": _t.time(),
         "stream": None,
     }
     _SESSIONS[sid] = state
@@ -175,24 +220,71 @@ def set_model_settings(req: ModelConfigRequest):
     return {"ok": True, "model": getattr(_MODEL, "model_id", req.model)}
 
 
+# ---------- 记忆管理 ----------
+
+class MemoryRequest(BaseModel):
+    content: str = ""
+    index: int = -1
+
+
+@app.get("/memory")
+def get_memory():
+    """返回所有记忆。"""
+    entries = []
+    for i, e in enumerate(_MEMORY.all()):
+        import time as _t
+        entries.append({"index": i, "content": e.content, "created_at": e.created_at})
+    return {"memories": entries}
+
+
+@app.post("/memory")
+def add_memory(req: MemoryRequest):
+    """添加一条记忆。"""
+    content = req.content.strip()
+    if not content:
+        return {"error": "内容不能为空"}, 400
+    _MEMORY.add(content)
+    return {"ok": True}
+
+
+@app.delete("/memory")
+def delete_memory(req: MemoryRequest):
+    """删除指定索引的记忆。"""
+    if _MEMORY.delete(req.index):
+        return {"ok": True}
+    return {"error": "记忆不存在"}, 404
+
+
 @app.post("/sessions")
 def new_session():
     sid = create_new_session(CWD).session_id
+    import time as _t
     _SESSIONS[sid] = {
         "messages": [{"role": "system", "content": _system_prompt()}],
         "cwd": CWD,
         "name": f"会话 {sid[:8]}",
+        "_sid": sid,
+        "_created_at": _t.time(),
         "stream": None,
     }
+    _persist_session(_SESSIONS[sid])
     return {"session_id": sid}
 
 
 @app.delete("/sessions/{session_id}")
 def delete_session(session_id: str):
-    """删除会话。"""
+    """删除会话(内存 + 磁盘)。"""
     if session_id not in _SESSIONS:
         return {"error": "session not found"}, 404
     del _SESSIONS[session_id]
+    # 删除磁盘文件
+    try:
+        from minicore.session import sessions_dir
+        p = sessions_dir() / f"{session_id}.json"
+        if p.exists():
+            p.unlink()
+    except Exception:
+        pass
     return {"ok": True}
 
 
@@ -323,6 +415,7 @@ def workspace_pick(req: WorkspaceRequest):
         "role": "user",
         "content": f"[系统] 工作目录已切换到: {state['cwd']}",
     })
+    _persist_session(state)
     return {"ok": True, "cwd": state["cwd"]}
 
 
@@ -341,6 +434,7 @@ def workspace_open(req: WorkspaceRequest):
         "role": "user",
         "content": f"[系统] 工作目录已切换到: {state['cwd']}",
     })
+    _persist_session(state)
     return {"session_id": req.session_id, "cwd": state["cwd"]}
 
 
@@ -398,12 +492,14 @@ def chat(req: ChatRequest):
                 state["chunks"] = chunks
                 state["done"] = True
                 print(f"[agent] 完成, {len(messages)} 条消息")
+                _persist_session(state)  # 持久化到磁盘
         except Exception as e:
             import traceback
             traceback.print_exc()
             state["chunks"] = chunks
             state["done"] = True
             state["error"] = str(e)
+            _persist_session(state)  # 异常也保存
 
     threading.Thread(target=_run, daemon=True).start()
     return {"session_id": sid}
