@@ -33,13 +33,17 @@ class Model:
 
 
 # ---------- DeepSeek 真实实现 ----------
-class DeepSeekModel(Model):
-    def __init__(self, api_key: str | None = None) -> None:
-        self.api_key = api_key or os.environ.get("DEEPSEEK_API_KEY", "")
-        if not self.api_key:
-            raise ValueError("需要 DEEPSEEK_API_KEY 环境变量或传 api_key")
+class OpenAICompatModel(Model):
+    """OpenAI 兼容模型:接受任意 base_url/api_key/model。
+
+    覆盖 DeepSeek、OpenAI、Ollama、LM Studio 等所有 OpenAI 协议服务。
+    """
+    def __init__(self, model: str, api_key: str | None = None, base_url: str | None = None) -> None:
+        self.model_id = model
+        self.api_key = api_key or os.environ.get("OPENAI_API_KEY", "") or "not-needed"
+        self.base_url = base_url or "https://api.openai.com/v1"
         self.client = openai.OpenAI(
-            base_url="https://api.deepseek.com",
+            base_url=self.base_url,
             api_key=self.api_key,
         )
 
@@ -50,7 +54,7 @@ class DeepSeekModel(Model):
 
         def _create():
             return self.client.chat.completions.create(
-                model="deepseek-v4-flash",
+                model=self.model_id,
                 messages=messages,
                 tools=tool_defs,
                 tool_choice="auto",
@@ -65,17 +69,15 @@ class DeepSeekModel(Model):
             content_parts: list[str] = []
             reasoning_parts: list[str] = []
             tool_calls_accum: dict[int, dict] = {}
-            finish_reason = None
             for chunk in response:
                 if not chunk.choices:
                     continue
                 delta = chunk.choices[0].delta
-                finish_reason = chunk.choices[0].finish_reason
                 # 文本增量
                 if getattr(delta, "content", None):
                     content_parts.append(delta.content)
                     on_chunk(delta.content)
-                # 思考增量
+                # 思考增量(DeepSeek 特有)
                 if hasattr(delta, "reasoning_content") and delta.reasoning_content:
                     reasoning_parts.append(delta.reasoning_content)
                 # 工具调用增量(OpenAI 流式工具调用是分段的)
@@ -119,10 +121,24 @@ class DeepSeekModel(Model):
         return AgentStep(type="assistant", content=choice.message.content or "", reasoning_content=reasoning)
 
 
+class DeepSeekModel(OpenAICompatModel):
+    """DeepSeek API 预设(OpenAI 兼容)。"""
+    def __init__(self, api_key: str | None = None) -> None:
+        key = api_key or os.environ.get("DEEPSEEK_API_KEY", "")
+        if not key:
+            raise ValueError("需要 DEEPSEEK_API_KEY 环境变量或传 api_key")
+        super().__init__(
+            model=os.environ.get("DEEPSEEK_MODEL", "deepseek-chat"),
+            api_key=key,
+            base_url="https://api.deepseek.com",
+        )
+
+
 # ---------- Mock 假实现 ----------
 class MockModel(Model):
     """不联网:靠规则演戏,方便离线测试整条链路。"""
-    def next(self, messages: list[dict[str, Any]]) -> AgentStep:
+    def next(self, messages: list[dict[str, Any]], *, on_chunk=None) -> AgentStep:
+        # Mock 不流式,忽略 on_chunk(保持接口兼容)
         # 如果最近有工具结果 → 基于结果给文本回答(不再无脑调工具)
         for m in reversed(messages):
             if m.get("role") == "tool":

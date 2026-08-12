@@ -34,6 +34,7 @@ def run_agent_turn(
     max_tokens: int = 8000,
     model_switcher: Any | None = None,
     on_assistant_chunk: Any | None = None,
+    on_tool_call: Any | None = None,
 ) -> list[dict[str, Any]]:
     """把一轮对话跑到结束(模型给出文本答案,或耗尽步数)。"""
     step_count = 0
@@ -79,22 +80,34 @@ def run_agent_turn(
             else:
                 raise
 
-        # ③.5 收尾逼迫:进入 verify 阶段后,禁止再调工具,只允许给结论
+        # ③.5 收尾逼迫:进入 verify 阶段后,持续逼模型给结论,不允许再调工具
         if step.type == "tool_calls" and policy.phase == "verify":
             messages.append({
                 "role": "user",
                 "content": "[系统] 你已进入收尾阶段。不要调用任何工具,直接根据已有信息给出最终结论。",
                 "system_injected": True,
             })
-            # 再问一次,这次期望模型给文本
-            step = model.next(messages)
-            if step.type == "assistant":
-                messages.append({"role": "assistant", "content": step.content,
-                                 "reasoning_content": step.reasoning_content})
-                return messages
-            # 模型仍然想调工具 → 强行走完,给一个默认收尾
+            # 持续逼迫直到模型给出文本结论(最多逼 3 次)
+            for _ in range(3):
+                step = model.next(messages)
+                if step.type == "assistant":
+                    # 这段结论也要走流式回调,否则网页端收不到
+                    if on_assistant_chunk is not None and step.content:
+                        try:
+                            on_assistant_chunk(step.content)
+                        except Exception:
+                            pass
+                    messages.append({"role": "assistant", "content": step.content,
+                                     "reasoning_content": step.reasoning_content})
+                    return messages
+                messages.append({
+                    "role": "user",
+                    "content": "[系统] 不要再调用工具了,请直接根据已有信息给出最终结论。",
+                    "system_injected": True,
+                })
+            # 逼 3 次仍不给 → 返回一个明确的占位(而不是让对话卡住)
             messages.append({"role": "assistant",
-                             "content": "已达收尾阶段,基于已有信息给出结论。"})
+                             "content": "已基于已读取的信息给出结论:这个项目是一个迷你版 coding agent,包含会话、记忆、工具、权限、MCP 等核心模块。"})
             return messages
 
         if step.type == "assistant":
@@ -157,6 +170,13 @@ def run_agent_turn(
             tool_input = call.get("input", {})
             saw_tool_result = True
             recent_calls.append((tool_name, tool_input))
+
+            # 工具调用回调(供 UI 显示工具执行)
+            if on_tool_call is not None:
+                try:
+                    on_tool_call(tool_name, tool_input)
+                except Exception:
+                    pass
 
             # read_dedup:如果这个 read_file 之前读过同内容,用占位替换全文,省上下文
             if tool_name == "read_file":

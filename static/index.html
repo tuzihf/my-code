@@ -1,0 +1,900 @@
+<!DOCTYPE html>
+<html lang="zh">
+<head>
+<meta charset="UTF-8">
+<meta name="viewport" content="width=device-width, initial-scale=1.0">
+<title>my-agent</title>
+<style>
+  :root {
+    --bg: #ffffff;
+    --panel: #fafafa;
+    --border: #e5e7eb;
+    --text: #111827;
+    --muted: #6b7280;
+    --accent: #6366f1;
+    --accent-soft: #eef2ff;
+    --tool: #9ca3af;
+    --danger: #ef4444;
+  }
+
+  * { margin: 0; padding: 0; box-sizing: border-box; }
+
+  body {
+    font-family: -apple-system, "Inter", "PingFang SC", "Microsoft YaHei", system-ui, sans-serif;
+    background: var(--bg);
+    color: var(--text);
+    height: 100vh;
+    display: flex;
+    flex-direction: column;
+    line-height: 1.6;
+  }
+
+  /* 顶栏 */
+  header {
+    display: flex;
+    align-items: center;
+    justify-content: space-between;
+    padding: 16px 28px;
+    border-bottom: 1px solid var(--border);
+  }
+  .brand { font-weight: 600; font-size: 15px; display: flex; align-items: center; gap: 8px; }
+  .brand .dot { width: 8px; height: 8px; border-radius: 50%; background: var(--accent); }
+  .actions { display: flex; gap: 8px; }
+  button {
+    font: inherit;
+    font-size: 13px;
+    padding: 6px 14px;
+    border: 1px solid var(--border);
+    border-radius: 8px;
+    background: var(--panel);
+    color: var(--text);
+    cursor: pointer;
+    transition: all 0.15s;
+  }
+  button:hover { border-color: var(--accent); color: var(--accent); }
+
+  /* 对话区 */
+  main {
+    flex: 1;
+    overflow-y: auto;
+    padding: 24px 0;
+    scroll-behavior: smooth;
+  }
+  .messages { max-width: 720px; margin: 0 auto; padding: 0 24px; }
+
+  /* 左右分栏:用户靠右,助手靠左 */
+  .msg {
+    display: flex;
+    gap: 12px;
+    margin-bottom: 24px;
+    animation: fadeIn 0.2s ease;
+    max-width: 85%;
+  }
+  .msg.user { margin-left: auto; flex-direction: row-reverse; }
+  .msg.assistant { margin-right: auto; }
+
+  .msg.user .body { text-align: right; }
+  .msg.assistant .body { text-align: left; }
+  .msg.user .content {
+    background: #fff;
+    color: var(--text);
+    border: 1px solid var(--border);
+    padding: 10px 14px;
+    border-radius: 14px 14px 4px 14px;
+    display: inline-block;   /* 气泡贴合文字宽度 */
+    max-width: 100%;
+    text-align: left;        /* 气泡内部文字左对齐 */
+    white-space: pre-wrap;   /* 保留换行 */
+  }
+  .msg.assistant .content {
+    background: var(--panel);
+    padding: 10px 14px;
+    border-radius: 14px 14px 14px 4px;
+  }
+
+  .avatar {
+    width: 30px; height: 30px; border-radius: 8px;
+    display: flex; align-items: center; justify-content: center;
+    font-size: 13px; flex-shrink: 0;
+  }
+  .msg.user .avatar { background: var(--accent-soft); color: var(--accent); }
+  .msg.assistant .avatar { background: #f3f4f6; color: var(--muted); }
+
+  .body { flex: 1; min-width: 0; }
+  .name { font-size: 12px; color: var(--muted); margin-bottom: 4px; font-weight: 500; }
+  .content { font-size: 14.5px; white-space: pre-wrap; word-wrap: break-word; }
+
+  /* Markdown 渲染样式 */
+  .content ul { margin: 6px 0; padding-left: 20px; }
+  .content li { margin: 3px 0; }
+  .content h2, .content h3, .content h4 { margin: 10px 0 6px; line-height: 1.3; }
+  .content h2 { font-size: 17px; }
+  .content h3 { font-size: 15.5px; }
+  .content h4 { font-size: 14.5px; }
+  .content strong { font-weight: 600; }
+  .content code {
+    background: var(--panel); padding: 2px 5px; border-radius: 4px;
+    font-family: ui-monospace, "Cascadia Code", monospace; font-size: 13px;
+  }
+  .content pre.code-block {
+    background: var(--panel); border: 1px solid var(--border); border-radius: 8px;
+    padding: 12px 14px; overflow-x: auto; margin: 8px 0;
+  }
+  .content pre.code-block code { background: none; padding: 0; font-size: 13px; line-height: 1.5; }
+  .content table.md-table {
+    border-collapse: collapse; margin: 8px 0; font-size: 13.5px; width: 100%;
+  }
+  .content table.md-table th, .content table.md-table td {
+    border: 1px solid var(--border); padding: 7px 10px; text-align: left;
+  }
+  .content table.md-table th { background: var(--panel); font-weight: 600; }
+  .msg.user .content { color: var(--text); }
+
+  /* 工具调用汇总标签 */
+  .tool-badge {
+    margin: 6px 0;
+    font-size: 12px;
+    color: var(--muted);
+    padding: 3px 10px;
+    background: var(--panel);
+    border: 1px solid var(--border);
+    border-radius: 20px;
+    display: inline-block;
+  }
+
+  .stream-cursor::after {
+    content: "▍";
+    color: var(--accent);
+    animation: blink 1s step-end infinite;
+  }
+  @keyframes blink { 50% { opacity: 0; } }
+
+  /* 正在思考占位 */
+  .thinking { color: var(--muted); font-style: italic; }
+  .thinking::after {
+    content: "...";
+    animation: dots 1.2s steps(4) infinite;
+  }
+  @keyframes dots {
+    0% { content: ""; }
+    25% { content: "."; }
+    50% { content: ".."; }
+    75% { content: "..."; }
+  }
+
+  /* 输入区 */
+  footer {
+    border-top: 1px solid var(--border);
+    padding: 16px 24px;
+    background: var(--bg);
+  }
+  .input-row {
+    max-width: 720px; margin: 0 auto;
+    display: flex; gap: 10px; align-items: center;
+  }
+  textarea {
+    flex: 1;
+    font: inherit; font-size: 14px;
+    padding: 12px 16px;
+    border: 1px solid var(--border);
+    border-radius: 12px;
+    resize: none;
+    outline: none;
+    background: var(--panel);
+    color: var(--text);
+    transition: border-color 0.15s;
+    line-height: 1.5;
+  }
+  textarea:focus { border-color: var(--accent); box-shadow: 0 0 0 3px var(--accent-soft); }
+  .send-btn {
+    width: 44px; height: 44px; border-radius: 12px;
+    border: none; background: var(--accent); color: #fff;
+    font-size: 18px; cursor: pointer; flex-shrink: 0;
+    display: flex; align-items: center; justify-content: center;
+    transition: opacity 0.15s;
+  }
+  .send-btn:hover { opacity: 0.85; }
+  .send-btn:disabled { opacity: 0.4; cursor: not-allowed; }
+
+  .hint { max-width: 720px; margin: 8px auto 0; font-size: 11px; color: var(--muted); }
+
+  /* 左侧会话栏 */
+  .app { display: flex; flex: 1; overflow: hidden; }
+  .sidebar {
+    width: 240px; border-right: 1px solid var(--border);
+    display: flex; flex-direction: column; background: var(--panel);
+  }
+  .sidebar-header {
+    padding: 14px 16px; font-weight: 600; font-size: 13px;
+    border-bottom: 1px solid var(--border); display: flex; justify-content: space-between; align-items: center;
+  }
+  .sidebar-list { flex: 1; overflow-y: auto; padding: 8px; }
+  .session-item {
+    padding: 10px 12px; border-radius: 8px; cursor: pointer; margin-bottom: 2px;
+    font-size: 13px; color: var(--text); transition: background 0.15s;
+    display: flex; align-items: center; gap: 8px;
+  }
+  .session-item:hover { background: var(--accent-soft); }
+  .session-item.active { background: var(--accent-soft); color: var(--accent); font-weight: 500; }
+  .session-item .dot { width: 6px; height: 6px; border-radius: 50%; background: var(--muted); flex-shrink: 0; }
+  .session-item.active .dot { background: var(--accent); }
+  .session-preview { font-size: 11px; color: var(--muted); overflow: hidden; white-space: nowrap; text-overflow: ellipsis; flex: 1; }
+  .content-area { flex: 1; display: flex; flex-direction: column; min-width: 0; }
+
+  /* 右键菜单 */
+  .context-menu {
+    position: fixed; background: #fff; border: 1px solid var(--border);
+    border-radius: 10px; box-shadow: 0 8px 30px rgba(0,0,0,0.12);
+    padding: 6px; z-index: 200; min-width: 140px;
+  }
+  .context-menu button {
+    display: block; width: 100%; text-align: left; border: none; background: none;
+    padding: 8px 12px; font-size: 13px; color: var(--text); border-radius: 6px; cursor: pointer;
+  }
+  .context-menu button:hover { background: var(--accent-soft); }
+  .context-menu button.danger { color: var(--danger); }
+  .context-menu button.danger:hover { background: #fef2f2; }
+
+  /* 目录浏览器弹窗 */
+  .modal-overlay {
+    position: fixed; inset: 0; background: rgba(0,0,0,0.35);
+    display: flex; align-items: center; justify-content: center; z-index: 100;
+  }
+  .modal {
+    width: 480px; max-height: 70vh; background: #fff;
+    border-radius: 14px; box-shadow: 0 20px 60px rgba(0,0,0,0.15);
+    display: flex; flex-direction: column; overflow: hidden;
+  }
+  .modal-header {
+    display: flex; justify-content: space-between; align-items: center;
+    padding: 14px 18px; border-bottom: 1px solid var(--border); font-weight: 600;
+  }
+  .modal-close { border: none; background: none; font-size: 16px; color: var(--muted); cursor: pointer; }
+  .modal-path {
+    padding: 10px 18px; font-size: 12px; color: var(--muted);
+    font-family: ui-monospace, monospace; border-bottom: 1px solid var(--border);
+    word-break: break-all;
+  }
+  .modal-body { flex: 1; overflow-y: auto; padding: 8px 0; }
+  .dir-row {
+    display: flex; justify-content: space-between; align-items: center;
+    padding: 9px 18px; cursor: pointer; font-size: 14px;
+  }
+  .dir-row:hover { background: var(--accent-soft); }
+  .dir-name { display: flex; align-items: center; gap: 8px; }
+  .dir-select {
+    font-size: 12px; padding: 3px 10px; border: 1px solid var(--border);
+    border-radius: 6px; background: #fff; color: var(--accent); cursor: pointer;
+  }
+  .dir-select:hover { border-color: var(--accent); }
+  .modal-empty { color: var(--muted); font-size: 13px; padding: 20px; text-align: center; }
+  .modal-footer {
+    display: flex; justify-content: flex-end; gap: 8px;
+    padding: 12px 18px; border-top: 1px solid var(--border);
+  }
+</style>
+</head>
+<body>
+
+<header>
+  <div class="brand"><span class="dot"></span>my-agent</div>
+  <div class="actions">
+    <button id="modelBtn">⚙ 模型: <span id="modelName">?</span></button>
+    <button id="workspaceBtn">📁 切换项目</button>
+    <button id="newBtn">＋ 新会话</button>
+  </div>
+</header>
+
+<div class="app">
+  <!-- 左侧会话栏 -->
+  <aside class="sidebar">
+    <div class="sidebar-header">
+      <span>会话</span>
+      <button id="refreshSessions" style="border:none;background:none;cursor:pointer;font-size:13px;color:var(--muted);" title="刷新会话列表">⟳</button>
+    </div>
+    <div class="sidebar-list" id="sessionList">
+      <div style="color:var(--muted);font-size:12px;padding:10px;">加载中...</div>
+    </div>
+  </aside>
+
+  <!-- 右侧对话区 -->
+  <div class="content-area">
+    <main id="chat">
+      <div class="messages" id="messages">
+        <div style="text-align:center;color:var(--muted);font-size:13px;padding:40px 0;">
+          你好,我是 my-agent。输入任务,我可以读取和修改项目文件。
+        </div>
+      </div>
+    </main>
+
+    <footer>
+  <div class="input-row">
+    <textarea id="input" rows="1" placeholder="输入消息,Enter 发送,Shift+Enter 换行"></textarea>
+    <button class="send-btn" id="sendBtn" title="发送">➤</button>
+  </div>
+  <div class="hint">会话 id: <span id="sid">(新建中)</span> · 工作目录: <span id="workspace">(加载中)</span></div>
+</footer>
+  </div><!-- /.content-area -->
+</div><!-- /.app -->
+
+<!-- 目录浏览器弹窗 -->
+<div class="modal-overlay" id="browseModal" style="display:none;">
+  <div class="modal">
+    <div class="modal-header">
+      <span>选择项目目录</span>
+      <button class="modal-close" id="browseClose">✕</button>
+    </div>
+    <div class="modal-path" id="browsePath">(加载中)</div>
+    <div class="modal-body" id="browseBody">
+      <div style="color:var(--muted);font-size:13px;">加载中...</div>
+    </div>
+    <div class="modal-footer">
+      <button id="browseUp">⬆ 上级</button>
+      <button id="browseCancel">取消</button>
+    </div>
+  </div>
+</div>
+
+<!-- 模型设置弹窗 -->
+<div class="modal-overlay" id="modelModal" style="display:none;">
+  <div class="modal" style="width:440px;">
+    <div class="modal-header">
+      <span>模型设置</span>
+      <button class="modal-close" id="modelClose">✕</button>
+    </div>
+    <div class="modal-body" style="padding:16px 20px;">
+      <label style="font-size:13px;color:var(--muted);">模型类型</label>
+      <select id="modelType" style="width:100%;padding:8px;border:1px solid var(--border);border-radius:8px;margin:6px 0 14px;font:inherit;">
+        <option value="deepseek">DeepSeek API</option>
+        <option value="openai_compat">OpenAI 兼容(本地模型/Ollama/其他)</option>
+        <option value="mock">Mock(测试,不联网)</option>
+      </select>
+      <label style="font-size:13px;color:var(--muted);">模型名</label>
+      <input id="modelNameInput" placeholder="如 deepseek-chat / llama3 / gpt-4o" style="width:100%;padding:8px;border:1px solid var(--border);border-radius:8px;margin:6px 0 14px;font:inherit;">
+      <label style="font-size:13px;color:var(--muted);">Base URL</label>
+      <input id="modelUrlInput" placeholder="如 https://api.deepseek.com 或 http://localhost:11434/v1" style="width:100%;padding:8px;border:1px solid var(--border);border-radius:8px;margin:6px 0 14px;font:inherit;">
+      <label style="font-size:13px;color:var(--muted);">API Key(本地模型可留空)</label>
+      <input id="modelKeyInput" type="password" placeholder="sk-..." style="width:100%;padding:8px;border:1px solid var(--border);border-radius:8px;margin:6px 0 14px;font:inherit;">
+      <div style="font-size:12px;color:var(--muted);margin-bottom:14px;">
+        预设:<br>
+        • DeepSeek: base_url=https://api.deepseek.com<br>
+        • Ollama 本地: base_url=http://localhost:11434/v1<br>
+        • LM Studio 本地: base_url=http://localhost:1234/v1
+      </div>
+    </div>
+    <div class="modal-footer">
+      <button id="modelCancel">取消</button>
+      <button id="modelSave" style="background:var(--accent);color:#fff;border:none;">保存</button>
+    </div>
+  </div>
+</div>
+
+<script>
+const messagesEl = document.getElementById('messages');
+const inputEl = document.getElementById('input');
+const sendBtn = document.getElementById('sendBtn');
+const sidEl = document.getElementById('sid');
+const workspaceEl = document.getElementById('workspace');
+
+let sessionId = null;
+let currentAssistantMsg = null; // 当前流式输出的消息元素
+let streaming = false;
+
+// ---- 轻量 Markdown 渲染 ----
+// 转义 HTML,防止 XSS
+function escapeHtml(s) {
+  return s.replace(/&/g, '&amp;').replace(/</g, '&lt;').replace(/>/g, '&gt;')
+          .replace(/"/g, '&quot;');
+}
+
+// 把 markdown 转成 HTML(处理标题/列表/表格/代码块/粗体/行内代码)
+function renderMarkdown(md) {
+  if (!md) return '';
+  let html = escapeHtml(md);
+
+  // 代码块(先保护,避免被其他规则破坏)
+  const codeBlocks = [];
+  html = html.replace(/```(\w*)\n([\s\S]*?)```/g, (m, lang, code) => {
+    codeBlocks.push(`<pre class="code-block"><code>${code}</code></pre>`);
+    return `@@CODE${codeBlocks.length - 1}@@`;
+  });
+
+  // 表格(把 | a | b | 行转成表格)
+  html = html.replace(/(\|[^\n]+\|\n\|[^\n]+\|\n(?:[^\n]*\n?)*)/g, (m) => {
+    const rows = m.trim().split('\n').filter(r => r.trim().startsWith('|') && r.trim().endsWith('|'));
+    if (rows.length < 2) return m;
+    const cells = rows.map(r => r.trim().slice(1, -1).split('|').map(c => c.trim()));
+    let tbl = '<table class="md-table"><thead><tr>';
+    cells[0].forEach(c => { tbl += `<th>${c}</th>`; });
+    tbl += '</tr></thead><tbody>';
+    for (let i = 2; i < cells.length; i++) {
+      tbl += '<tr>';
+      cells[i].forEach(c => { tbl += `<td>${c}</td>`; });
+      tbl += '</tr>';
+    }
+    tbl += '</tbody></table>';
+    return tbl;
+  });
+
+  // 标题
+  html = html.replace(/^### (.*)$/gm, '<h4>$1</h4>');
+  html = html.replace(/^## (.*)$/gm, '<h3>$1</h3>');
+  html = html.replace(/^# (.*)$/gm, '<h2>$1</h2>');
+
+  // 无序列表
+  html = html.replace(/^\s*[-*] (.+)$/gm, '<li>$1</li>');
+  html = html.replace(/(<li>[\s\S]*?<\/li>)(\n|$)/g, '<ul>$1</ul>\n');
+
+  // 粗体
+  html = html.replace(/\*\*(.+?)\*\*/g, '<strong>$1</strong>');
+  // 行内代码
+  html = html.replace(/`([^`]+)`/g, '<code>$1</code>');
+
+  // 恢复代码块
+  html = html.replace(/@@CODE(\d+)@@/g, (m, i) => codeBlocks[+i] || '');
+
+  // 段落换行
+  html = html.replace(/\n{2,}/g, '</p><p>');
+  html = html.replace(/\n/g, '<br>');
+
+  return html;
+}
+
+async function createSession() {
+  const res = await fetch('/sessions', { method: 'POST' });
+  const data = await res.json();
+  sessionId = data.session_id;
+  sidEl.textContent = sessionId;
+  localStorage.setItem('myagent_session', sessionId);
+  loadWorkspace();
+}
+
+// 加载某个已有会话(历史切换)
+async function loadSession(id) {
+  if (!id) return;
+  sessionId = id;
+  sidEl.textContent = id;
+  localStorage.setItem('myagent_session', id);
+  // 加载历史
+  messagesEl.innerHTML = '';
+  try {
+    const res = await fetch(`/sessions/${id}/history`);
+    const data = await res.json();
+    const msgs = data.messages || [];
+    if (!msgs.length) {
+      addMessage('assistant', '会话为空,有什么可以帮你?');
+    } else {
+      msgs.forEach(m => {
+        const role = m.role;
+        if (role === 'assistant' && m.content) addMessage('assistant', m.content);
+        else if (role === 'user' && m.content) addMessage('user', m.content);
+        // tool / system 消息跳过
+      });
+    }
+  } catch (e) {
+    addMessage('assistant', '(加载历史失败)');
+  }
+  loadWorkspace();
+}
+
+// 初始化:优先恢复上次会话
+async function initSession() {
+  const saved = localStorage.getItem('myagent_session');
+  if (saved) {
+    try {
+      // 确认会话存在(服务端可能已重启丢失)
+      const res = await fetch(`/sessions/${saved}/history`);
+      const data = await res.json();
+      if (data.messages !== undefined) {
+        await loadSession(saved);
+        return;
+      }
+    } catch (e) { /* 会话不存在,新建 */ }
+  }
+  await createSession();
+}
+
+// 加载当前工作目录
+async function loadWorkspace() {
+  if (!sessionId) return;
+  try {
+    const res = await fetch(`/sessions/${sessionId}/workspace`);
+    const data = await res.json();
+    if (data.cwd) workspaceEl.textContent = data.cwd;
+  } catch (e) { /* ignore */ }
+}
+
+// ---- 目录浏览器 ----
+let browseStack = [];  // 导航栈,记录路径
+
+async function openBrowser() {
+  if (!sessionId) return;
+  // 调后端弹系统原生文件夹选择器(此电脑界面)
+  try {
+    const res = await fetch('/workspace/pick', {
+      method: 'POST',
+      headers: { 'Content-Type': 'application/json' },
+      body: JSON.stringify({ session_id: sessionId, path: '' }),
+    });
+    const data = await res.json();
+    if (data.cancelled) return;  // 用户取消
+    if (data.error) { alert(data.error); return; }
+    if (data.cwd) {
+      workspaceEl.textContent = data.cwd;
+      messagesEl.innerHTML = '';
+      addMessage('assistant', `已切换到项目: ${data.cwd}\n这个会话只会在该项目目录内读取/修改文件。`);
+    }
+  } catch (err) {
+    alert('切换项目失败: ' + err);
+  }
+}
+
+function closeBrowser() {
+  document.getElementById('browseModal').style.display = 'none';
+}
+
+async function loadBrowseDir(path) {
+  document.getElementById('browsePath').textContent = path;
+  const body = document.getElementById('browseBody');
+  body.innerHTML = '<div style="color:var(--muted);font-size:13px;padding:20px;">加载中...</div>';
+  try {
+    const res = await fetch(`/browse?path=${encodeURIComponent(path)}`);
+    const data = await res.json();
+    if (data.error) {
+      body.innerHTML = `<div class="modal-empty">${data.error}</div>`;
+      return;
+    }
+    browseStack.push(path);
+    // 上级按钮(盘符根的 parent 是空字符串,也允许回到根)
+    document.getElementById('browseUp').onclick = () => {
+      if (data.parent !== null && data.parent !== undefined) loadBrowseDir(data.parent);
+    };
+    if (!data.dirs.length) {
+      body.innerHTML = '<div class="modal-empty">此目录下没有子目录</div>';
+      return;
+    }
+    // 渲染目录列表
+    const rows = data.dirs.map(name => {
+      // 路径拼接:空路径(盘符根)直接是 name,否则 path + '/' + name
+      const fullPath = path ? (path.endsWith('/') || path.endsWith('\\') ? path + name : path + '/' + name) : name;
+      const row = document.createElement('div');
+      row.className = 'dir-row';
+      row.innerHTML = `
+        <div class="dir-name">📁 ${name}</div>
+        <button class="dir-select">选择</button>`;
+      // 点击目录行 → 进入
+      row.querySelector('.dir-name').addEventListener('click', () => loadBrowseDir(fullPath));
+      // 点"选择" → 选中此目录
+      row.querySelector('.dir-select').addEventListener('click', (e) => {
+        e.stopPropagation();
+        selectWorkspace(fullPath);
+      });
+      return row;
+    });
+    body.innerHTML = '';
+    rows.forEach(r => body.appendChild(r));
+  } catch (e) {
+    body.innerHTML = '<div class="modal-empty">加载失败</div>';
+  }
+}
+
+async function selectWorkspace(path) {
+  if (!sessionId) return;
+  const res = await fetch('/workspace/open', {
+    method: 'POST',
+    headers: { 'Content-Type': 'application/json' },
+    body: JSON.stringify({ session_id: sessionId, path: path }),
+  });
+  const data = await res.json();
+  if (data.error) { alert(data.error); return; }
+  workspaceEl.textContent = data.cwd;
+  messagesEl.innerHTML = '';
+  addMessage('assistant', `已切换到项目: ${data.cwd}\n这个会话只会在该项目目录内读取/修改文件。`);
+}
+
+// 切换项目按钮 → 打开目录浏览器
+document.getElementById('workspaceBtn').addEventListener('click', openBrowser);
+document.getElementById('browseClose').addEventListener('click', closeBrowser);
+document.getElementById('browseCancel').addEventListener('click', closeBrowser);
+
+// 显示一条消息
+function addMessage(role, content) {
+  const msg = document.createElement('div');
+  msg.className = `msg ${role}`;
+  const avatarText = role === 'user' ? '你' : 'AI';
+  msg.innerHTML = `
+    <div class="avatar">${avatarText}</div>
+    <div class="body">
+      <div class="name">${role === 'user' ? '你' : '助手'}</div>
+      <div class="content"></div>
+    </div>`;
+  msg.querySelector('.content').innerHTML = renderMarkdown(content);
+  messagesEl.appendChild(msg);
+  scrollBottom();
+  return msg;
+}
+
+function scrollBottom() {
+  const chat = document.getElementById('chat');
+  chat.scrollTop = chat.scrollHeight;
+}
+
+// 发送消息
+let activeStream = null;  // 当前活跃的 EventSource
+
+async function send() {
+  const text = inputEl.value.trim();
+  if (!text || streaming) return;
+
+  // 关闭上一轮的流,防止旧数据串到新消息
+  if (activeStream) { activeStream.close(); activeStream = null; }
+
+  addMessage('user', text);
+  inputEl.value = '';
+  resetInputHeight();  // 发送后强制回单行
+  sendBtn.disabled = true;
+  streaming = true;
+
+  // 准备助手消息(流式填充)
+  const msg = document.createElement('div');
+  msg.className = 'msg assistant';
+  msg.innerHTML = `
+    <div class="avatar">AI</div>
+    <div class="body">
+      <div class="name">助手</div>
+      <div class="content stream-cursor"><span class="thinking">正在思考…</span></div>
+    </div>`;
+  messagesEl.appendChild(msg);
+  currentAssistantMsg = msg.querySelector('.content');
+  const thinkingEl = currentAssistantMsg.querySelector('.thinking');
+  scrollBottom();
+
+  try {
+    const res = await fetch('/chat', {
+      method: 'POST',
+      headers: { 'Content-Type': 'application/json' },
+      body: JSON.stringify({ message: text, session_id: sessionId }),
+    });
+    const data = await res.json();
+    sessionId = data.session_id;
+    sidEl.textContent = sessionId;
+
+    // 接 SSE 流式
+    const toolCalls = [];  // 收集工具调用,结束时汇总显示
+    const es = new EventSource(`/sessions/${sessionId}/stream`);
+    activeStream = es;
+    es.onmessage = (e) => {
+      const payload = JSON.parse(e.data);
+      if (payload.type === 'tool_call') {
+        // 只收集,不逐条显示(避免刷屏)
+        toolCalls.push(payload.tool);
+        return;
+      }
+      if (payload.delta) {
+        // 移除"正在思考"占位
+        const thinking = currentAssistantMsg.querySelector('.thinking');
+        if (thinking) thinking.remove();
+        currentAssistantMsg.textContent += payload.delta;
+        currentAssistantMsg.classList.add('stream-cursor');
+        scrollBottom();
+      } else if (payload.done) {
+        es.close();
+        activeStream = null;
+        currentAssistantMsg.classList.remove('stream-cursor');
+        // 流式结束:一次性渲染 markdown
+        const finalText = currentAssistantMsg.textContent;
+        currentAssistantMsg.innerHTML = renderMarkdown(finalText);
+        streaming = false;
+        sendBtn.disabled = false;
+        inputEl.focus();
+        // 工具调用汇总标签(在消息块上方显示一个紧凑提示)
+        if (toolCalls.length > 0) {
+          const names = [...new Set(toolCalls.map(t => t.split(' ')[0]))];
+          const badge = document.createElement('div');
+          badge.className = 'tool-badge';
+          badge.textContent = `⚙ 使用了工具: ${names.join(', ')}`;
+          msg.querySelector('.body').insertBefore(badge, currentAssistantMsg);
+        }
+        // 兜底:如果没有收到任何流式增量(如 Mock 模型),移除占位并从 history 拉最终回答
+        const thinkingLeft = currentAssistantMsg.querySelector('.thinking');
+        if (thinkingLeft || !currentAssistantMsg.textContent.trim()) {
+          if (thinkingLeft) thinkingLeft.remove();
+          loadFinalAssistant();
+        }
+      }
+    };
+    es.onerror = () => {
+      es.close();
+      activeStream = null;
+      streaming = false;
+      sendBtn.disabled = false;
+      currentAssistantMsg.classList.remove('stream-cursor');
+    };
+  } catch (err) {
+    console.error(err);
+    streaming = false;
+    sendBtn.disabled = false;
+  }
+}
+
+// 从 history 拉取最后一条 assistant 回复,填入当前消息块(无流式时的兜底)
+async function loadFinalAssistant() {
+  try {
+    const res = await fetch(`/sessions/${sessionId}/history`);
+    const data = await res.json();
+    const msgs = data.messages || [];
+    for (let i = msgs.length - 1; i >= 0; i--) {
+      if (msgs[i].role === 'assistant' && msgs[i].content) {
+        currentAssistantMsg.textContent = msgs[i].content;
+        break;
+      }
+    }
+    scrollBottom();
+  } catch (e) { /* ignore */ }
+}
+
+// 事件绑定
+sendBtn.addEventListener('click', send);
+inputEl.addEventListener('keydown', (e) => {
+  if (e.key === 'Enter' && !e.shiftKey) {
+    e.preventDefault();
+    send();
+  }
+});
+// 自动增高(完全贴合内容字数,无上限)
+function autoResizeInput() {
+  inputEl.style.height = 'auto';          // 先重置,让 scrollHeight 反映内容
+  inputEl.style.height = inputEl.scrollHeight + 'px';  // 完全贴合内容高度
+}
+// 发送后强制回单行高度
+function resetInputHeight() {
+  inputEl.style.height = 'auto';
+  inputEl.style.height = '48px';
+}
+inputEl.addEventListener('input', autoResizeInput);
+
+// 左侧会话列表:渲染所有会话
+async function renderSessionList() {
+  const listEl = document.getElementById('sessionList');
+  try {
+    const res = await fetch('/sessions');
+    const data = await res.json();
+    const sessions = data.sessions || [];
+    if (!sessions.length) {
+      listEl.innerHTML = '<div style="color:var(--muted);font-size:12px;padding:10px;">暂无会话</div>';
+      return;
+    }
+    listEl.innerHTML = '';
+    // 最新在前
+    sessions.slice().reverse().forEach(s => {
+      const id = s.id, name = s.name || id.slice(0, 12);
+      const item = document.createElement('div');
+      item.className = 'session-item' + (id === sessionId ? ' active' : '');
+      item.innerHTML = `
+        <span class="dot"></span>
+        <span class="session-preview">${name}</span>`;
+      item.title = id;
+      item.addEventListener('click', () => {
+        if (id !== sessionId) loadSession(id);
+      });
+      // 右键菜单
+      item.addEventListener('contextmenu', (e) => {
+        e.preventDefault();
+        showContextMenu(e.clientX, e.clientY, id, name);
+      });
+      listEl.appendChild(item);
+    });
+  } catch (e) {
+    listEl.innerHTML = '<div style="color:var(--muted);font-size:12px;padding:10px;">加载失败</div>';
+  }
+}
+
+// 右键菜单
+let ctxMenuEl = null;
+function showContextMenu(x, y, id, name) {
+  closeContextMenu();
+  ctxMenuEl = document.createElement('div');
+  ctxMenuEl.className = 'context-menu';
+  ctxMenuEl.innerHTML = `
+    <button data-act="rename">✏️ 重命名</button>
+    <button data-act="delete" class="danger">🗑 删除</button>`;
+  ctxMenuEl.style.left = x + 'px';
+  ctxMenuEl.style.top = y + 'px';
+  document.body.appendChild(ctxMenuEl);
+
+  ctxMenuEl.querySelector('[data-act="rename"]').addEventListener('click', async () => {
+    const newName = prompt('重命名会话:', name);
+    if (newName && newName.trim()) {
+      await fetch(`/sessions/${id}`, {
+        method: 'PATCH',
+        headers: { 'Content-Type': 'application/json' },
+        body: JSON.stringify({ name: newName.trim() }),
+      });
+      renderSessionList();
+    }
+    closeContextMenu();
+  });
+
+  ctxMenuEl.querySelector('[data-act="delete"]').addEventListener('click', async () => {
+    if (confirm(`删除会话 ${name}?`)) {
+      await fetch(`/sessions/${id}`, { method: 'DELETE' });
+      // 如果删除的是当前会话,新建一个
+      if (id === sessionId) {
+        await createSession();
+        messagesEl.innerHTML = '';
+        addMessage('assistant', '新会话已创建,有什么可以帮你?');
+      }
+      renderSessionList();
+    }
+    closeContextMenu();
+  });
+}
+
+function closeContextMenu() {
+  if (ctxMenuEl) { ctxMenuEl.remove(); ctxMenuEl = null; }
+}
+// 点击其他地方关闭菜单
+document.addEventListener('click', closeContextMenu);
+
+// 刷新按钮
+document.getElementById('refreshSessions').addEventListener('click', renderSessionList);
+
+// 新会话后刷新列表
+document.getElementById('newBtn').addEventListener('click', async () => {
+  await createSession();
+  messagesEl.innerHTML = '';
+  addMessage('assistant', '新会话已创建,有什么可以帮你?');
+  renderSessionList();
+});
+
+// ---- 模型设置 ----
+const modelNameEl = document.getElementById('modelName');
+
+async function loadModelSettings() {
+  try {
+    const res = await fetch('/settings/model');
+    const config = await res.json();
+    modelNameEl.textContent = config.model || config.type || '?';
+  } catch (e) { modelNameEl.textContent = '?'; }
+}
+
+document.getElementById('modelBtn').addEventListener('click', async () => {
+  document.getElementById('modelModal').style.display = 'flex';
+  // 加载当前配置到表单
+  try {
+    const res = await fetch('/settings/model');
+    const config = await res.json();
+    document.getElementById('modelType').value = config.type || 'deepseek';
+    document.getElementById('modelNameInput').value = config.model || '';
+    document.getElementById('modelUrlInput').value = config.base_url || '';
+    document.getElementById('modelKeyInput').value = '';
+  } catch (e) {}
+});
+document.getElementById('modelClose').addEventListener('click', () => {
+  document.getElementById('modelModal').style.display = 'none';
+});
+document.getElementById('modelCancel').addEventListener('click', () => {
+  document.getElementById('modelModal').style.display = 'none';
+});
+document.getElementById('modelSave').addEventListener('click', async () => {
+  const type = document.getElementById('modelType').value;
+  const model = document.getElementById('modelNameInput').value.trim();
+  const base_url = document.getElementById('modelUrlInput').value.trim();
+  const api_key = document.getElementById('modelKeyInput').value.trim();
+  const res = await fetch('/settings/model', {
+    method: 'POST',
+    headers: { 'Content-Type': 'application/json' },
+    body: JSON.stringify({ type, model, base_url, api_key }),
+  });
+  const data = await res.json();
+  if (data.error) { alert(data.error); return; }
+  document.getElementById('modelModal').style.display = 'none';
+  modelNameEl.textContent = data.model || model || type;
+});
+
+// 初始化:恢复上次会话或新建
+initSession().then(renderSessionList);
+loadModelSettings();
+</script>
+</body>
+</html>
