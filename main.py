@@ -13,7 +13,11 @@ from minicore.session import (
 )
 from minicore.memory import MemoryStore
 from minicore.permissions import PermissionManager
+from minicore.dotenv import load_dotenv
 from pathlib import Path
+
+# 加载项目根目录的 .env(如需,可配置 DEEPSEEK_API_KEY / MY_AGENT_MOCK 等)
+load_dotenv()
 
 # Windows 终端中文显示兼容
 if hasattr(sys.stdout, "reconfigure"):
@@ -133,6 +137,14 @@ def main() -> None:
             continue
         if user_input == "/sessions":
             print(format_session_list())
+            continue
+        if user_input == "/cleanup":
+            from minicore.cleanup_sessions import plan_cleanup
+            keep, remove = plan_cleanup()
+            print(f"将保留 {len(keep)} 个,删除 {len(remove)} 个会话:")
+            for sid, reason in remove:
+                print(f"  - {sid}: {reason}")
+            print("真正删除请运行: python -m minicore.cleanup_sessions --delete")
             continue
         if user_input.startswith("/resume"):
             parts = user_input.split(maxsplit=1)

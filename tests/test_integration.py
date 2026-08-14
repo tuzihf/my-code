@@ -12,7 +12,6 @@ pytestmark = pytest.mark.integration
 from minicore.tools import create_default_tools, ToolContext, ToolRegistry, ToolDefinition, ToolResult
 from minicore.model import DeepSeekModel, set_tools
 from minicore.agent_loop import run_agent_turn
-from minicore.mcp import StdioMcpClient
 
 
 def _have_api_key():
@@ -61,7 +60,7 @@ class TestParallelPerf:
         ])
 
         class ParallelModel:
-            def next(self, messages):
+            def next(self, messages, *, on_chunk=None, tools=None):
                 from minicore.model import AgentStep
                 return AgentStep(type="tool_calls", calls=[
                     {"id": f"c{i}", "toolName": "list_files", "input": {"path": str(i)}} for i in range(3)
@@ -73,18 +72,6 @@ class TestParallelPerf:
                        cwd=str(Path(".").resolve()), max_steps=2)
         elapsed = time.time() - t0
         assert elapsed < 0.9, f"并行应 <0.9s,实际 {elapsed:.2f}s(可能串行了)"
-
-
-class TestMcpReal:
-    def test_list_and_call(self):
-        client = StdioMcpClient("fake", ["python", "minicore/fake_mcp_server.py"])
-        try:
-            tools = client.list_tools()
-            assert any(t.name == "add" for t in tools)
-            result = client.call_tool("add", {"a": 3, "b": 4})
-            assert "7" in result
-        finally:
-            client.close()
 
 
 class TestEncoding:

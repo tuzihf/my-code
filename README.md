@@ -13,16 +13,16 @@
 
 ## 功能特性
 
-- **Agent 主循环**:think → act → observe 循环,phase 状态机 + verification 门禁
-- **工具系统**:6 个内置工具(文件读写、命令执行、记忆、精确编辑)+ MCP 接入 + 并行调用 + 输入校验
-- **会话管理**:持久会话、checkpoint、rewind 安全回退,会话落盘重启可恢复
-- **记忆系统**:跨会话项目知识存储,自动注入上下文
-- **上下文优化**:read_dedup 去重、大结果持久化、上下文压缩
-- **安全**:路径沙箱(锁死项目目录)、命令逃逸拦截、敏感工具权限确认
-- **模型管理**:支持 DeepSeek / OpenAI 兼容 / 本地模型 / Mock,配置持久化,一键切换
+- **Agent 主循环**:think → act → observe 循环,phase 状态机 + verification 门禁 + `finish` 结构化结束 + 编辑后自动验证(`auto_verify`)
+- **工具系统**:14 个内置工具(文件读写、命令执行、glob、符号搜索、记忆、精确编辑、apply_patch、verify、finish、只读子代理)+ MCP 接入 + 并行调用 + 输入校验 + JSON Schema
+- **会话管理**:持久会话、checkpoint、rewind 安全回退、多文件 group 整体回退,会话落盘重启可恢复
+- **记忆系统**:跨会话项目知识存储,自动注入上下文,按 workspace 隔离
+- **上下文优化**:read_dedup 去重、大结果持久化、真实 token 驱动的上下文压缩、符号级代码索引
+- **安全**:路径沙箱(锁死项目目录)、命令白名单 + shell=False、敏感工具权限确认、diff approve(编辑前确认)
+- **模型管理**:支持 DeepSeek / OpenAI 兼容 / 本地模型 / Mock,配置持久化,一键切换,token 用量与成本追踪
 - **可靠性**:API 重试 + 指数退避、模型 fallback、收尾逼迫
-- **网页端**:左侧会话栏、流式打字、代码修改 diff 展示、系统文件夹选择器、记忆管理
-- **测试**:62 个 pytest 用例,含单元测试和集成测试
+- **网页端**:左侧会话栏、流式打字、代码修改 diff 展示、撤销修改、停止生成、系统文件夹选择器、记忆管理、token 用量
+- **测试**:130 个 pytest 用例(126 个单元测试 + 4 个集成测试)
 
 ## 快速开始
 
@@ -72,16 +72,19 @@ MY_AGENT_MOCK=1 python server.py
 ### CLI(main.py)
 
 - 交互式对话,输入任务,agent 自动决定调用工具
-- 支持本地命令:`/tools`、`/sessions`、`/resume`、`/history`、`/rewind`、`/rewind-preview`
+- 支持本地命令:`/tools`、`/sessions`、`/resume`、`/history`、`/rewind`、`/rewind-preview`、`/cleanup`
 
 ### 网页端(server.py)
 
 - **左侧会话栏**:切换、右键删除/重命名会话
 - **切换项目**:系统文件夹选择器选项目目录,agent 只在该目录内操作
 - **模型设置**:顶栏 ⚙ 按钮,切换 DeepSeek / OpenAI 兼容 / 本地模型
-- **记忆管理**:顶栏 🧠 按钮,查看/添加/删除记忆
-- **流式输出**:逐字打字,可随时停止
+- **记忆管理**:顶栏 🧠 按钮,查看/添加/删除记忆(按当前 workspace 隔离)
+- **流式输出**:逐字打字,可随时停止(真正停止后台 agent)
 - **代码 diff**:修改文件后展示红绿高亮 diff(默认折叠)
+- **撤销修改**:顶栏 ↩ 按钮,用 checkpoint 回退最近一次文件修改
+- **token 用量**:顶栏 💰 按钮查看 token 统计与成本估算
+- **diff approve(可选)**:`MY_AGENT_CONFIRM_EDIT=1 python server.py` 开启后,agent 每次改文件前弹窗展示 diff,批准后才真正写入
 
 ## 架构
 
@@ -90,21 +93,25 @@ main.py / server.py          入口(CLI / 网页端)
     │
     ▼
 minicore/                    核心包
-    ├── agent_loop.py        Agent 主循环
+    ├── agent_loop.py        Agent 主循环(finish 门禁 / 自动验证 / 真实 token 压缩)
     ├── kernel.py            phase 状态机 + verification 门禁
-    ├── tools.py             工具注册表 + MCP + 子代理
-    ├── model.py             模型接口(DeepSeek/OpenAI兼容/Mock)
-    ├── session.py           会话持久化 + checkpoint + rewind
+    ├── tools.py             工具注册表(14 工具)+ MCP + 子代理 + 输入校验 + schema
+    ├── model.py             模型接口(DeepSeek/OpenAI兼容/Mock)+ usage 追踪
+    ├── session.py           会话持久化 + checkpoint + rewind + group 回退
     ├── memory.py            记忆系统
-    ├── context_compactor.py 上下文压缩
-    ├── read_dedup.py        重复读去重
+    ├── context_compactor.py 上下文压缩(force 模式)
+    ├── read_dedup.py        重复读去重(按文件片段)
     ├── tool_cache.py        大结果持久化
     ├── path_safety.py       路径沙箱
-    ├── permissions.py       权限管理
+    ├── permissions.py       权限管理(allow/allow_once/deny/deny_once 四态)
     ├── api_retry.py         API 重试 + 退避
     ├── model_switcher.py    模型 fallback
     ├── diff.py              diff 生成
     ├── mcp.py               MCP 客户端
+    ├── patch.py             apply_patch(unified diff + fuzz 匹配)
+    ├── code_index.py        符号级代码索引(ast)
+    ├── dotenv.py            .env 加载
+    ├── fsutil.py            原子写 + 损坏文件备份
     └── settings.py          模型配置持久化
 ```
 
@@ -116,7 +123,9 @@ my-agent/
 ├── server.py            网页端后端(FastAPI)
 ├── minicore/            核心包(见上)
 ├── static/index.html    网页端前端
-├── tests/               测试(pytest)
+├── tests/               测试(pytest,126 单元 + 4 集成)
+├── pyproject.toml       打包 + 依赖 + ruff 配置
+├── .github/workflows/   CI(Python 3.11-3.13)
 ├── .env.example         环境变量示例
 └── pytest.ini           pytest 配置
 ```
@@ -137,6 +146,8 @@ python -m pytest -m integration
 - FastAPI + SSE(网页端)
 - openai SDK(模型接入)
 - pytest(测试)
+- ruff(lint)
+- 标准库 ast(符号级代码索引)
 
 ## License
 

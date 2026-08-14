@@ -86,3 +86,76 @@ class TestReadableConversation:
             {"role": "user", "content": "真实问题"},
         ]
         assert session_mod.readable_conversation_count(messages) == 1
+
+
+def test_name_roundtrip():
+    s = session_mod.create_new_session("proj")
+    s.name = "我的会话"
+    d = s.to_dict()
+    assert d["name"] == "我的会话"
+    loaded = session_mod.SessionData.from_dict(d)
+    assert loaded.name == "我的会话"
+
+
+def test_name_legacy_default():
+    # 旧数据没有 name 字段时,应默认空字符串
+    loaded = session_mod.SessionData.from_dict({"session_id": "x", "created_at": 0, "workspace": "."})
+    assert loaded.name == ""
+
+
+def test_load_corrupt_returns_none(iso_sessions):
+    bad = iso_sessions / "bad.json"
+    bad.write_text("{ not valid json", encoding="utf-8")
+    assert session_mod.load_session("bad") is None
+    assert (iso_sessions / "bad.json.corrupt").exists()  # 损坏文件被备份
+
+
+def test_rewind_group_restores_all(tmp_path):
+    """同一 group 的多个文件整体回退(一个 turn 事务)。"""
+    a = tmp_path / "a.txt"
+    b = tmp_path / "b.txt"
+    a.write_text("a1", encoding="utf-8")
+    b.write_text("b1", encoding="utf-8")
+    s = session_mod.create_new_session(str(tmp_path))
+    session_mod.create_file_checkpoint(s, file_path=str(a), existed=True, previous_content="a1", group_id="g1")
+    session_mod.create_file_checkpoint(s, file_path=str(b), existed=True, previous_content="b1", group_id="g1")
+    a.write_text("a2", encoding="utf-8")
+    b.write_text("b2", encoding="utf-8")
+    restored = session_mod.rewind_group(s, group_id="g1")
+    assert len(restored) == 2
+    assert a.read_text(encoding="utf-8") == "a1"
+    assert b.read_text(encoding="utf-8") == "b1"
+
+
+def test_rewind_group_empty_or_missing(tmp_path):
+    s = session_mod.create_new_session(str(tmp_path))
+    assert session_mod.rewind_group(s, group_id="") == []
+    assert session_mod.rewind_group(s, group_id="nonexistent") == []
+
+
+def test_checkpoint_group_id_roundtrip(tmp_path):
+    """group_id 随 checkpoint 序列化/反序列化保留。"""
+    s = session_mod.create_new_session(str(tmp_path))
+    session_mod.create_file_checkpoint(
+        s, file_path=str(tmp_path / "x.txt"), existed=False, previous_content="", group_id="g9")
+    d = s.to_dict()
+    assert d["checkpoints"][0]["group_id"] == "g9"
+    loaded = session_mod.SessionData.from_dict(d)
+    assert loaded.checkpoints[0].group_id == "g9"
+
+
+def test_history_roundtrip():
+    """完整可读历史 history 序列化/反序列化保留,不受 messages 影响。"""
+    s = session_mod.create_new_session("proj")
+    s.history = [
+        {"role": "user", "content": "问题1"},
+        {"role": "assistant", "content": "回答1"},
+    ]
+    d = s.to_dict()
+    assert d["history"] == s.history
+    loaded = session_mod.SessionData.from_dict(d)
+    assert loaded.history == s.history
+    # 旧数据无 history 字段时默认空
+    legacy = session_mod.SessionData.from_dict(
+        {"session_id": "x", "created_at": 0, "workspace": "."})
+    assert legacy.history == []

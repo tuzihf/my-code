@@ -2,6 +2,10 @@
 __pycache__/
 *.py[cod]
 .pytest_cache/
+.pytest_tmp/
+.test_tmp/
+.test_tmp2/
+.mode_0700/
 
 # IDE
 .idea/

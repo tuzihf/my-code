@@ -6,8 +6,11 @@
 """
 from __future__ import annotations
 
+import logging
 import time
 from typing import Any, Callable
+
+logger = logging.getLogger("my-agent.api_retry")
 
 
 # 可恢复的错误标记(错误信息里含这些词 → 值得重试)
@@ -49,7 +52,8 @@ def with_retry(
         except Exception as e:
             if attempt >= max_retries or not _is_retryable(e):
                 raise  # 重试耗尽或不可恢复 → 抛
-            print(f"[重试] {type(e).__name__}: {str(e)[:60]} → 等 {delay:.1f}s 后重试 ({attempt+1}/{max_retries})")
+            logger.warning("重试 %s: %s → 等 %.1fs 后重试 (%d/%d)",
+                           type(e).__name__, str(e)[:60], delay, attempt + 1, max_retries)
             time.sleep(delay)
             delay *= 2  # 指数退避
     raise RuntimeError("unreachable")

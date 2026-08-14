@@ -49,3 +49,18 @@ class TestMcpClient:
         # 多次调用,确保状态不残留
         assert "30" in client.call_tool("add", {"a": 10, "b": 20})
         assert "5" in client.call_tool("add", {"a": 2, "b": 3})
+
+    def test_request_timeout(self):
+        """不响应的服务端应快速返回错误,而不是永久挂起。"""
+        import sys
+        import time
+        c = StdioMcpClient("slow", [sys.executable, "-c", "import time; time.sleep(30)"],
+                           request_timeout=0.5)
+        try:
+            t0 = time.time()
+            resp = c._request("tools/list")
+            elapsed = time.time() - t0
+            assert "error" in resp
+            assert elapsed < 3, f"超时应在 3s 内返回,实际 {elapsed:.2f}s"
+        finally:
+            c.close()

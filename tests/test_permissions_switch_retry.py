@@ -27,6 +27,26 @@ class TestPermissions:
         pm.check_permission("write_file", {"path": "x"})
         assert pm.decisions.get("write_file") == "allow_once"
 
+    def test_allow_persistent(self):
+        calls = {"n": 0}
+        def prompt(req):
+            calls["n"] += 1
+            return {"decision": "allow"}
+        pm = PermissionManager(cwd=".", prompt=prompt)
+        assert pm.check_permission("write_file", {"path": "a"})[0] is True
+        assert pm.check_permission("write_file", {"path": "b"})[0] is True
+        assert calls["n"] == 1  # 第二次复用历史决定,不再询问
+
+    def test_deny_persistent(self):
+        calls = {"n": 0}
+        def prompt(req):
+            calls["n"] += 1
+            return {"decision": "deny"}
+        pm = PermissionManager(cwd=".", prompt=prompt)
+        assert pm.check_permission("write_file", {})[0] is False
+        assert pm.check_permission("write_file", {})[0] is False
+        assert calls["n"] == 1  # 第二次直接拒绝,不再询问
+
 
 class TestModelSwitcher:
     def _make(self):

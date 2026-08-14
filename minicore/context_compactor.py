@@ -42,7 +42,7 @@ def should_compact(messages: list[dict[str, Any]], *, max_tokens: int = 2000) ->
     return _messages_token_count(messages) > max_tokens
 
 
-def compact(messages: list[dict[str, Any]], *, keep_recent: int = 4, max_tokens: int = 2000) -> tuple[list[dict[str, Any]], bool]:
+def compact(messages: list[dict[str, Any]], *, keep_recent: int = 4, max_tokens: int = 2000, force: bool = False) -> tuple[list[dict[str, Any]], bool]:
     """把最旧的几轮浓缩成摘要,返回 (压缩后的消息, 是否真的压缩了)。
 
     策略:
@@ -53,7 +53,7 @@ def compact(messages: list[dict[str, Any]], *, keep_recent: int = 4, max_tokens:
          - 工具结果/旧回答:浓缩成摘要,只留开头
       4. 压缩摘要只保留一份,不无限嵌套
     """
-    if not should_compact(messages, max_tokens=max_tokens):
+    if not force and not should_compact(messages, max_tokens=max_tokens):
         return messages, False
     if len(messages) <= keep_recent:
         return messages, False
@@ -67,6 +67,9 @@ def compact(messages: list[dict[str, Any]], *, keep_recent: int = 4, max_tokens:
         if not (str(m.get("content") or "").startswith("前情摘要:"))
     ]
 
+    # system 消息(系统提示词)必须原样保留,不能浓缩删除
+    system_msgs = [m for m in old if m.get("role") == "system"]
+
     # 用户的真实提问:完整保留
     user_questions = [
         {"role": "user", "content": str(m["content"])}
@@ -78,6 +81,8 @@ def compact(messages: list[dict[str, Any]], *, keep_recent: int = 4, max_tokens:
     summary_parts = []
     for m in old_without_prev:
         role = m.get("role", "?")
+        if role == "system":
+            continue   # system 已单独保留
         content = m.get("content") or ""
         if isinstance(content, list):
             content = " ".join(str(p.get("text", p)) for p in content)
@@ -92,8 +97,9 @@ def compact(messages: list[dict[str, Any]], *, keep_recent: int = 4, max_tokens:
     if summary_parts:
         summary = "前情摘要:" + "|".join(summary_parts)[:1200]
 
-    # 组装:老摘要(替换版) + 保留的用户问题 + 最近消息
+    # 组装:system 消息 + 老摘要(替换版) + 保留的用户问题 + 最近消息
     compacted: list[dict[str, Any]] = []
+    compacted.extend(system_msgs)
     if summary:
         compacted.append({"role": "user", "content": summary})
     compacted.extend(user_questions)

@@ -8,19 +8,25 @@
 - 有对话但占比 < 30% 且总数 > 5 → 删除
 
 执行前先预览,加 --delete 才真正删除。
+CLI 的 /cleanup 命令复用 plan_cleanup() 做预览。
 """
+from __future__ import annotations
+
+import pathlib
 import sys
-sys.stdout.reconfigure(encoding="utf-8")
 
-import session as session_mod
+from minicore import session as session_mod
 
 
-def main() -> None:
-    do_delete = "--delete" in sys.argv
-    healthy_only = "--healthy" in sys.argv
+def plan_cleanup(healthy_only: bool = False) -> tuple[list, list]:
+    """规划清理。返回 (keep, remove)。
+
+    keep  : [(sid, readable, total, ratio), ...]
+    remove: [(sid, reason), ...]
+    """
     ids = session_mod.list_sessions()
-    keep = []
-    remove = []
+    keep: list = []
+    remove: list = []
     for sid in ids:
         s = session_mod.load_session(sid)
         if s is None:
@@ -36,8 +42,15 @@ def main() -> None:
                 keep.append((sid, readable, total, ratio))
         else:
             remove.append((sid, f"可读对话:0/{total}"))
+    return keep, remove
 
-    print(f"共 {len(ids)} 个会话")
+
+def main() -> None:
+    do_delete = "--delete" in sys.argv
+    healthy_only = "--healthy" in sys.argv
+    keep, remove = plan_cleanup(healthy_only=healthy_only)
+
+    print(f"共 {len(keep) + len(remove)} 个会话")
     print(f"保留 {len(keep)} 个:")
     for sid, r, t, ratio in keep:
         print(f"  💬 {sid} | 对话:{r}/{t} ({ratio:.0%})")
@@ -50,7 +63,6 @@ def main() -> None:
         return
 
     for sid, _ in remove:
-        import pathlib
         p = pathlib.Path(session_mod.sessions_dir()) / f"{sid}.json"
         if p.exists():
             p.unlink()
@@ -59,4 +71,5 @@ def main() -> None:
 
 
 if __name__ == "__main__":
+    sys.stdout.reconfigure(encoding="utf-8")
     main()

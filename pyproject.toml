@@ -1,0 +1,39 @@
+[build-system]
+requires = ["setuptools>=68"]
+build-backend = "setuptools.build_meta"
+
+[project]
+name = "my-agent"
+version = "0.1.0"
+description = "一个基于 Python 从零开发的轻量级终端编程助手(迷你版 coding agent)"
+readme = "README.md"
+requires-python = ">=3.11"
+license = { text = "MIT" }
+authors = [{ name = "my-agent" }]
+dependencies = [
+    "openai>=1.30",
+    "fastapi>=0.110",
+    "uvicorn>=0.29",
+    "pydantic>=2.6",
+]
+
+[project.optional-dependencies]
+dev = [
+    "pytest>=8.0",
+    "ruff>=0.6",
+]
+
+[tool.setuptools]
+# main.py / server.py 是顶层脚本模块
+py-modules = ["main", "server"]
+
+[tool.setuptools.packages.find]
+include = ["minicore*"]
+
+[tool.ruff]
+line-length = 120
+target-version = "py311"
+
+[tool.ruff.lint]
+select = ["E", "F", "W", "I"]
+ignore = ["E501", "E402"]

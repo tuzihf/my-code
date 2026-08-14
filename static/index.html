@@ -183,6 +183,16 @@
   }
   @keyframes blink { 50% { opacity: 0; } }
 
+  /* 过程状态行:单行滚动覆盖显示工具调用过程(不累积) */
+  .status-line {
+    font-size: 12px;
+    color: var(--muted);
+    padding: 2px 0 4px;
+    white-space: nowrap;
+    overflow: hidden;
+    text-overflow: ellipsis;
+  }
+
   /* 正在思考占位 */
   .thinking { color: var(--muted); font-style: italic; }
   .thinking::after {
@@ -326,6 +336,8 @@
     <button id="modelBtn">⚙ 模型: <span id="modelName">?</span></button>
     <button id="memoryBtn">🧠 记忆</button>
     <button id="workspaceBtn">📁 切换项目</button>
+    <button id="rewindBtn" title="撤销最近一次文件修改(checkpoint 回退)">↩ 撤销修改</button>
+    <button id="usageBtn" title="查看 token 用量与成本">💰 用量</button>
     <button id="newBtn">＋ 新会话</button>
   </div>
 </header>
@@ -358,7 +370,7 @@
     <button class="stop-btn" id="stopBtn" title="停止生成" style="display:none;">■</button>
     <button class="send-btn" id="sendBtn" title="发送">➤</button>
   </div>
-  <div class="hint">会话 id: <span id="sid">(新建中)</span> · 工作目录: <span id="workspace">(加载中)</span></div>
+  <div class="hint">会话 id: <span id="sid">(新建中)</span> · 工作目录: <span id="workspace">(加载中)</span> · Token: <span id="usageDisplay" title="">-</span></div>
 </footer>
   </div><!-- /.content-area -->
 </div><!-- /.app -->
@@ -430,6 +442,23 @@
       <div id="memoryList" style="max-height:300px;overflow-y:auto;">
         <div style="color:var(--muted);font-size:13px;">加载中...</div>
       </div>
+    </div>
+  </div>
+</div>
+
+<!-- 编辑确认弹窗(diff approve) -->
+<div class="modal-overlay" id="editModal" style="display:none;">
+  <div class="modal" style="width:620px;">
+    <div class="modal-header">
+      <span>确认文件修改</span>
+    </div>
+    <div class="modal-body" style="padding:12px 16px;">
+      <div id="editTool" style="font-size:12px;color:var(--muted);margin-bottom:8px;font-weight:500;"></div>
+      <pre id="editDiff" style="background:#fafafa;border:1px solid var(--border);border-radius:8px;padding:12px;max-height:320px;overflow:auto;font-size:12px;line-height:1.5;white-space:pre-wrap;word-break:break-all;margin:0;"></pre>
+    </div>
+    <div class="modal-footer">
+      <button id="editReject">✕ 拒绝</button>
+      <button id="editApprove" style="background:var(--accent);color:#fff;border:none;">✓ 应用</button>
     </div>
   </div>
 </div>
@@ -532,9 +561,14 @@ async function loadSession(id) {
     } else {
       msgs.forEach(m => {
         const role = m.role;
-        if (role === 'assistant' && m.content) addMessage('assistant', m.content);
-        else if (role === 'user' && m.content) addMessage('user', m.content);
-        // tool / system 消息跳过
+        const content = m.content;
+        if (!content) return;
+        // 跳过系统注入消息(带 system_injected 标记,或 "[系统]" 前缀兜底)
+        if (m.system_injected) return;
+        if (typeof content === 'string' && content.startsWith('[系统]')) return;
+        if (role === 'assistant') addMessage('assistant', content);
+        else if (role === 'user') addMessage('user', content);
+        // system / tool 消息跳过
       });
     }
   } catch (e) {
@@ -720,10 +754,12 @@ async function send() {
     <div class="avatar">AI</div>
     <div class="body">
       <div class="name">助手</div>
+      <div class="status-line"></div>
       <div class="content stream-cursor"><span class="thinking">正在思考…</span></div>
     </div>`;
   messagesEl.appendChild(msg);
   currentAssistantMsg = msg.querySelector('.content');
+  const statusLineEl = msg.querySelector('.status-line');
   const thinkingEl = currentAssistantMsg.querySelector('.thinking');
   scrollBottom();
 
@@ -742,11 +778,32 @@ async function send() {
     const toolDiffs = [];  // 收集修改 diff,助手回答后统一插入
     const es = new EventSource(`/sessions/${sessionId}/stream`);
     activeStream = es;
+    startEditPolling();  // 轮询待确认的编辑 diff
     es.onmessage = (e) => {
       const payload = JSON.parse(e.data);
+      if (payload.type === 'error') {
+        // 后端异常:直接显示错误信息,便于排查
+        if (statusLineEl) statusLineEl.remove();
+        const thinking = currentAssistantMsg.querySelector('.thinking');
+        if (thinking) thinking.remove();
+        currentAssistantMsg.textContent = '❌ 出错: ' + payload.message;
+        currentAssistantMsg.classList.remove('stream-cursor');
+        scrollBottom();
+        return;
+      }
+      if (payload.type === 'revoke') {
+        // 被门禁否决的中间文本:清空已流式显示的内容(模型会继续给出最终结论)
+        currentAssistantMsg.textContent = '';
+        currentAssistantMsg.classList.remove('stream-cursor');
+        return;
+      }
       if (payload.type === 'tool_call') {
-        // 只收集,不实时刷屏;结束后统一显示汇总
+        // 单行状态覆盖显示工具调用过程(不累积,最终回答前只占一行)
         toolCalls.push(payload.tool);
+        if (statusLineEl) {
+          statusLineEl.textContent = '⚙ ' + payload.tool;
+        }
+        scrollBottom();
         return;
       }
       if (payload.type === 'tool_diff') {
@@ -755,7 +812,8 @@ async function send() {
         return;
       }
       if (payload.delta) {
-        // 移除"正在思考"占位
+        // 进入最终回答:移除过程状态行和"正在思考"占位,开始流式累积
+        if (statusLineEl) statusLineEl.remove();
         const thinking = currentAssistantMsg.querySelector('.thinking');
         if (thinking) thinking.remove();
         currentAssistantMsg.textContent += payload.delta;
@@ -764,6 +822,7 @@ async function send() {
       } else if (payload.done) {
         es.close();
         activeStream = null;
+        stopEditPolling();
         currentAssistantMsg.classList.remove('stream-cursor');
         // 流式结束:一次性渲染 markdown
         const finalText = currentAssistantMsg.textContent;
@@ -804,17 +863,15 @@ async function send() {
           msg.parentNode.insertBefore(details, msg.nextSibling);
         });
         scrollBottom();
-        // 兜底:如果没有收到任何流式增量(如 Mock 模型),移除占位并从 history 拉最终回答
-        const thinkingLeft = currentAssistantMsg.querySelector('.thinking');
-        if (thinkingLeft || !currentAssistantMsg.textContent.trim()) {
-          if (thinkingLeft) thinkingLeft.remove();
-          loadFinalAssistant();
-        }
+        // 用 history 的最终 assistant 回复覆盖流式累积内容:
+        // 流式阶段可能包含被门禁否决的中间结论(先输出后被否决),最终结论才是该显示的
+        loadFinalAssistant();
       }
     };
     es.onerror = () => {
       es.close();
       activeStream = null;
+      stopEditPolling();
       streaming = false;
       stopBtn.style.display = 'none';
       sendBtn.disabled = false;
@@ -827,7 +884,7 @@ async function send() {
   }
 }
 
-// 从 history 拉取最后一条 assistant 回复,填入当前消息块(无流式时的兜底)
+// 从 history 拉取最后一条 assistant 回复,覆盖当前消息块(用最终结论修正流式过程输出)
 async function loadFinalAssistant() {
   try {
     const res = await fetch(`/sessions/${sessionId}/history`);
@@ -835,7 +892,7 @@ async function loadFinalAssistant() {
     const msgs = data.messages || [];
     for (let i = msgs.length - 1; i >= 0; i--) {
       if (msgs[i].role === 'assistant' && msgs[i].content) {
-        currentAssistantMsg.textContent = msgs[i].content;
+        currentAssistantMsg.innerHTML = renderMarkdown(msgs[i].content);
         break;
       }
     }
@@ -846,8 +903,12 @@ async function loadFinalAssistant() {
 // 事件绑定
 sendBtn.addEventListener('click', send);
 
-// 停止生成:关闭当前流,恢复输入
+// 停止生成:通知后端停止 + 关闭当前流,恢复输入
 stopBtn.addEventListener('click', () => {
+  // 通知后端停止后台 agent(协作式取消)
+  if (sessionId) {
+    fetch(`/sessions/${sessionId}/stop`, { method: 'POST' }).catch(() => {});
+  }
   if (activeStream) {
     activeStream.close();
     activeStream = null;
@@ -976,6 +1037,91 @@ document.getElementById('newBtn').addEventListener('click', async () => {
   renderSessionList();
 });
 
+// 撤销最近一次文件修改(checkpoint 回退)
+document.getElementById('rewindBtn').addEventListener('click', async () => {
+  if (!sessionId) return;
+  if (!confirm('撤销最近一次文件修改(用 checkpoint 还原)?')) return;
+  try {
+    const res = await fetch(`/sessions/${sessionId}/rewind`, { method: 'POST' });
+    const data = await res.json();
+    if (data.ok) {
+      const files = (data.restored || []).join(', ') || '无';
+      alert(`已还原: ${files}`);
+      addMessage('assistant', `↩ 已撤销最近一次文件修改。还原: ${files}`);
+    } else {
+      alert(data.message || '没有可回退的修改');
+    }
+  } catch (e) {
+    alert('撤销失败: ' + e);
+  }
+});
+
+// 查看 token 用量与成本
+async function refreshUsage() {
+  try {
+    const res = await fetch('/usage');
+    const u = await res.json();
+    const el = document.getElementById('usageDisplay');
+    if (el) {
+      el.textContent = `${u.total_tokens}`;
+      el.title = `请求 ${u.requests} 次 · 输入 ${u.prompt_tokens} · 输出 ${u.completion_tokens} · 合计 ${u.total_tokens} · 成本 ¥${u.cost ?? 0}`;
+    }
+    return u;
+  } catch (e) {
+    return null;
+  }
+}
+
+document.getElementById('usageBtn').addEventListener('click', async () => {
+  const u = await refreshUsage();
+  if (!u) { alert('获取用量失败'); return; }
+  const cost = u.cost !== undefined ? ` · 成本 ¥${u.cost}` : '';
+  alert(`Token 用量\n请求: ${u.requests} 次\n输入: ${u.prompt_tokens}\n输出: ${u.completion_tokens}\n合计: ${u.total_tokens}${cost}`);
+});
+
+// 定期刷新底部 token 显示(每 5 秒)
+setInterval(refreshUsage, 5000);
+
+// ---- 编辑确认(diff approve)----
+let editPollTimer = null;
+
+function startEditPolling() {
+  if (editPollTimer) return;
+  editPollTimer = setInterval(async () => {
+    if (!sessionId) return;
+    try {
+      const res = await fetch(`/sessions/${sessionId}/pending-edit`);
+      const data = await res.json();
+      if (data.pending) {
+        stopEditPolling();
+        showEditModal(data.pending);
+      }
+    } catch (e) { /* ignore */ }
+  }, 1000);
+}
+
+function stopEditPolling() {
+  if (editPollTimer) { clearInterval(editPollTimer); editPollTimer = null; }
+}
+
+function showEditModal(pending) {
+  document.getElementById('editTool').textContent = `待确认工具: ${pending.tool}`;
+  document.getElementById('editDiff').textContent = pending.diff || '(无 diff)';
+  document.getElementById('editModal').style.display = 'flex';
+}
+
+function decideEdit(approve) {
+  document.getElementById('editModal').style.display = 'none';
+  if (sessionId) {
+    fetch(`/sessions/${sessionId}/edit-decision?approve=${approve}`, { method: 'POST' }).catch(() => {});
+  }
+  // 恢复轮询(可能还有下一个待确认编辑)
+  startEditPolling();
+}
+
+document.getElementById('editApprove').addEventListener('click', () => decideEdit(true));
+document.getElementById('editReject').addEventListener('click', () => decideEdit(false));
+
 // ---- 模型设置 ----
 const modelNameEl = document.getElementById('modelName');
 
@@ -1025,7 +1171,7 @@ document.getElementById('modelSave').addEventListener('click', async () => {
 async function renderMemoryList() {
   const listEl = document.getElementById('memoryList');
   try {
-    const res = await fetch('/memory');
+    const res = await fetch(`/memory?session_id=${encodeURIComponent(sessionId || '')}`);
     const data = await res.json();
     const memories = data.memories || [];
     if (!memories.length) {
@@ -1041,7 +1187,7 @@ async function renderMemoryList() {
       delBtn.textContent = '删除';
       delBtn.style.cssText = 'font-size:12px;padding:3px 10px;border:1px solid var(--border);border-radius:6px;background:#fff;color:var(--danger);cursor:pointer;';
       delBtn.addEventListener('click', async () => {
-        await fetch('/memory', { method: 'DELETE', headers: { 'Content-Type': 'application/json' }, body: JSON.stringify({ index: m.index }) });
+        await fetch('/memory', { method: 'DELETE', headers: { 'Content-Type': 'application/json' }, body: JSON.stringify({ index: m.index, session_id: sessionId }) });
         renderMemoryList();
       });
       row.appendChild(delBtn);
@@ -1063,7 +1209,7 @@ document.getElementById('memoryAdd').addEventListener('click', async () => {
   const input = document.getElementById('memoryInput');
   const content = input.value.trim();
   if (!content) return;
-  await fetch('/memory', { method: 'POST', headers: { 'Content-Type': 'application/json' }, body: JSON.stringify({ content }) });
+  await fetch('/memory', { method: 'POST', headers: { 'Content-Type': 'application/json' }, body: JSON.stringify({ content, session_id: sessionId }) });
   input.value = '';
   renderMemoryList();
 });
@@ -1071,6 +1217,7 @@ document.getElementById('memoryAdd').addEventListener('click', async () => {
 // 初始化:恢复上次会话或新建
 initSession().then(renderSessionList);
 loadModelSettings();
+refreshUsage();
 </script>
 </body>
 </html>

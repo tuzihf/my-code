@@ -6,6 +6,8 @@ from dataclasses import dataclass, field
 from pathlib import Path
 from typing import Any
 
+from minicore.fsutil import atomic_write_text, backup_corrupt
+
 
 @dataclass
 class MemoryEntry:
@@ -30,16 +32,20 @@ class MemoryStore:
 
     def _load(self) -> None:
         if self.path.exists():
-            data = json.loads(self.path.read_text(encoding="utf-8"))
-            self.entries = [MemoryEntry.from_dict(e) for e in data]
+            try:
+                data = json.loads(self.path.read_text(encoding="utf-8"))
+                self.entries = [MemoryEntry.from_dict(e) for e in data]
+            except Exception:
+                # 文件损坏:备份后置空,避免启动崩溃
+                backup_corrupt(self.path)
+                self.entries = []
         else:
             self.entries = []
 
     def _save(self) -> None:
-        self.path.parent.mkdir(parents=True, exist_ok=True)
-        self.path.write_text(
+        atomic_write_text(
+            self.path,
             json.dumps([e.to_dict() for e in self.entries], ensure_ascii=False, indent=2),
-            encoding="utf-8",
         )
 
     def add(self, content: str) -> MemoryEntry:

@@ -31,20 +31,34 @@ class PermissionManager:
 
     # 真正执行前,检查是否允许
     def check_permission(self, tool_name: str, input_data: dict[str, Any]) -> tuple[bool, str]:
-        """返回 (allowed, reason)。allowed=False 表示被拒绝。"""
+        """返回 (allowed, reason)。allowed=False 表示被拒绝。
+
+        四种决定:
+        - allow      : 永久允许该工具(后续不再询问)
+        - allow_once : 仅本次允许(下次重新询问)
+        - deny       : 永久拒绝该工具(后续直接拒绝)
+        - deny_once  : 仅本次拒绝(下次重新询问)
+        """
         if not self._needs_confirmation(tool_name):
             return True, ""   # 只读工具,直接放行
+
+        # 先查历史决定:allow / deny 是持久的,直接复用,不再询问
+        prev = self.decisions.get(tool_name)
+        if prev == "allow":
+            return True, "已永久允许"
+        if prev == "deny":
+            return False, "已永久拒绝"
 
         request = {
             "tool": tool_name,
             "input": input_data,
             "summary": f"{tool_name} 需要你的批准",
         }
-        decision = self._prompt(request)
-        self.decisions[tool_name] = decision.get("decision", "deny")
-        allowed = decision.get("decision") in ("allow", "allow_once")
-        reason = "用户批准" if allowed else "用户拒绝"
-        return allowed, reason
+        decision = self._prompt(request).get("decision", "deny_once")
+        self.decisions[tool_name] = decision
+        if decision in ("allow", "allow_once"):
+            return True, "用户批准"
+        return False, "用户拒绝"
 
     # 默认的询问逻辑(真实交互时用 input 问用户)
     def _default_prompt(self, request: dict[str, Any]) -> dict[str, str]:
